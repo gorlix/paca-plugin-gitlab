@@ -3,8 +3,9 @@ package main
 import (
 	"crypto/hmac"
 	"crypto/sha256"
-	"encoding/hex"
+	"encoding/base64"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	plugin "github.com/Paca-AI/plugin-sdk-go"
@@ -28,25 +29,25 @@ func setupPlugin(t *testing.T) *plugintest.Context {
 	})
 
 	// Seed empty plugin tables so queries return empty result sets instead of errors.
-	tc.DB.SeedRows("github_integrations",
+	tc.DB.SeedRows("gitlab_integrations",
 		[]string{"id", "project_id", "access_token_enc", "created_at", "updated_at"},
 		nil)
-	tc.DB.SeedRows("github_repositories",
+	tc.DB.SeedRows("gitlab_repositories",
 		[]string{"id", "project_id", "integration_id", "owner", "repo_name", "full_name",
 			"webhook_id", "webhook_secret_enc", "default_branch", "created_at", "updated_at"},
 		nil)
-	tc.DB.SeedRows("github_pull_requests",
-		[]string{"id", "project_id", "repo_id", "pr_number", "github_pr_id", "title",
+	tc.DB.SeedRows("gitlab_merge_requests",
+		[]string{"id", "project_id", "repo_id", "pr_number", "gitlab_mr_id", "title",
 			"state", "html_url", "head_branch", "base_branch", "author", "merged_at", "created_at", "updated_at"},
 		nil)
-	tc.DB.SeedRows("github_task_pr_links",
-		[]string{"id", "task_id", "pull_request_id", "created_at"},
+	tc.DB.SeedRows("gitlab_task_mr_links",
+		[]string{"id", "task_id", "merge_request_id", "created_at"},
 		nil)
-	tc.DB.SeedRows("github_task_branches",
+	tc.DB.SeedRows("gitlab_task_branches",
 		[]string{"id", "task_id", "repo_id", "branch_name", "created_at"},
 		nil)
 
-	var p githubPlugin
+	var p gitlabPlugin
 	if err := p.Init(tc.PluginContext()); err != nil {
 		t.Fatal("Init failed:", err)
 	}
@@ -93,9 +94,9 @@ func TestGetIntegration_NotConnected(t *testing.T) {
 
 // ── PR review/comment tests ────────────────────────────────────────────────────
 //
-// These cover the paths reachable without an outbound GitHub API call
-// (validation and "PR not linked to this task"). The actual GitHub call
-// (ghClient -> plugin.Fetch) always errors outside a WASM build — see
+// These cover the paths reachable without an outbound GitLab API call
+// (validation and "PR not linked to this task"). The actual GitLab call
+// (glClient -> plugin.Fetch) always errors outside a WASM build — see
 // plugin-sdk-go's native_backends.go — so the happy path for these three
 // handlers, like the existing createPullRequest handler, isn't unit-testable
 // here and is covered manually / by integration testing instead.
@@ -235,8 +236,8 @@ func TestCreateBranch_MissingRepoID(t *testing.T) {
 // with tasks.read/write on their own project could substitute a foreign
 // taskId to read or attach records to a completely different project's
 // task. taskBelongsToProject now runs before any of that, so these all
-// resolve to a 404 before ever reaching a GitHub API call or a DB write —
-// which is also what keeps them unit-testable, since the outbound GitHub
+// resolve to a 404 before ever reaching a GitLab API call or a DB write —
+// which is also what keeps them unit-testable, since the outbound GitLab
 // call itself always errors outside a real WASM build (see the comment
 // above the PR review/comment tests).
 
@@ -287,12 +288,12 @@ func TestListTaskBranches_CrossProjectTaskRejected(t *testing.T) {
 // wouldn't reach.
 func TestListTaskBranches_ReturnsOwnProjectBranches(t *testing.T) {
 	tc := setupPlugin(t)
-	tc.DB.SeedRows("github_repositories",
+	tc.DB.SeedRows("gitlab_repositories",
 		[]string{"id", "project_id", "integration_id", "owner", "repo_name", "full_name",
 			"webhook_id", "webhook_secret_enc", "default_branch", "created_at", "updated_at"},
 		[][]any{{"repo-1", testProjectID, "integration-1", "octocat", "hello-world", "octocat/hello-world",
 			"wh-1", "enc-secret", "main", "now", "now"}})
-	tc.DB.SeedRows("github_task_branches",
+	tc.DB.SeedRows("gitlab_task_branches",
 		[]string{"id", "task_id", "repo_id", "branch_name", "created_at"},
 		[][]any{{"branch-1", testTaskID, "repo-1", "feature/x", "now"}})
 
@@ -312,18 +313,18 @@ func TestListTaskBranches_ReturnsOwnProjectBranches(t *testing.T) {
 }
 
 // TestListTaskBranches_SkipsRepoFromAnotherProject mirrors
-// TestListTaskPRs_SkipsLinkFromAnotherProject: github_task_branches has no
+// TestListTaskPRs_SkipsLinkFromAnotherProject: gitlab_task_branches has no
 // project_id of its own, only repo_id, so a branch row pointing at a repo
 // that belongs to a different project must be filtered out even when the
 // task itself is the caller's own.
 func TestListTaskBranches_SkipsRepoFromAnotherProject(t *testing.T) {
 	tc := setupPlugin(t)
-	tc.DB.SeedRows("github_repositories",
+	tc.DB.SeedRows("gitlab_repositories",
 		[]string{"id", "project_id", "integration_id", "owner", "repo_name", "full_name",
 			"webhook_id", "webhook_secret_enc", "default_branch", "created_at", "updated_at"},
 		[][]any{{"repo-foreign", "other-project", "integration-1", "octocat", "other-repo", "octocat/other-repo",
 			"wh-1", "enc-secret", "main", "now", "now"}})
-	tc.DB.SeedRows("github_task_branches",
+	tc.DB.SeedRows("gitlab_task_branches",
 		[]string{"id", "task_id", "repo_id", "branch_name", "created_at"},
 		[][]any{{"branch-1", testTaskID, "repo-foreign", "feature/x", "now"}})
 
@@ -398,20 +399,20 @@ func TestUnlinkPRFromTask_CrossProjectTaskRejected(t *testing.T) {
 
 // TestListTaskPRs_SkipsLinkFromAnotherProject covers the defense-in-depth
 // layer on top of taskBelongsToProject: even for the caller's own,
-// legitimate task, a github_task_pr_links row pointing at a PR that
+// legitimate task, a gitlab_task_mr_links row pointing at a PR that
 // actually belongs to a different project (e.g. one created by a pre-fix
 // caller exploiting the taskId substitution above) must not be returned.
 func TestListTaskPRs_SkipsLinkFromAnotherProject(t *testing.T) {
 	tc := setupPlugin(t)
-	tc.DB.SeedRows("github_pull_requests",
-		[]string{"id", "project_id", "repo_id", "pr_number", "github_pr_id", "title",
+	tc.DB.SeedRows("gitlab_merge_requests",
+		[]string{"id", "project_id", "repo_id", "pr_number", "gitlab_mr_id", "title",
 			"state", "html_url", "head_branch", "base_branch", "author", "merged_at", "created_at", "updated_at"},
 		[][]any{
 			{"pr-foreign", "other-project", "repo-1", 1, int64(1), "Someone else's PR",
 				"open", "https://example.com", "feature", "main", "octocat", nil, "now", "now"},
 		})
-	tc.DB.SeedRows("github_task_pr_links",
-		[]string{"id", "task_id", "pull_request_id", "created_at"},
+	tc.DB.SeedRows("gitlab_task_mr_links",
+		[]string{"id", "task_id", "merge_request_id", "created_at"},
 		[][]any{{"link-1", testTaskID, "pr-foreign", "now"}})
 
 	res := tc.Call("GET", "/tasks/:taskId/pull-requests", reqWithPathParams(map[string]string{"taskId": testTaskID}))
@@ -431,7 +432,7 @@ func TestListTaskPRs_SkipsLinkFromAnotherProject(t *testing.T) {
 
 // ── Webhook: project scoping + signature verification ────────────────────────
 //
-// receiveWebhook always responds 204 regardless of outcome (so GitHub
+// receiveWebhook always responds 204 regardless of outcome (so GitLab
 // doesn't retry on an application-level rejection), so the status code
 // can't distinguish "accepted" from "rejected" the way it can for the
 // authenticated API routes elsewhere in this file. These tests instead
@@ -442,15 +443,28 @@ func TestListTaskPRs_SkipsLinkFromAnotherProject(t *testing.T) {
 
 const testEncryptionKey = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" // 64 hex chars = 32 bytes
 
-func signedWebhookRequest(projectID string, payload []byte, secret string) plugintest.Request {
-	mac := hmac.New(sha256.New, []byte(secret))
-	mac.Write(payload)
-	sig := "sha256=" + hex.EncodeToString(mac.Sum(nil))
+func signedWebhookRequest(projectID string, payload []byte, signingToken string) plugintest.Request {
+	// GitLab 19+ Standard Webhooks: sign "{id}.{timestamp}.{body}" with whsec_ key.
+	msgID := "msg_test_1"
+	ts := "1710000000"
+	keyPart := strings.TrimPrefix(signingToken, "whsec_")
+	key, err := base64.StdEncoding.DecodeString(keyPart)
+	if err != nil {
+		// Allow raw test secrets: wrap as whsec_ of the utf8 bytes encoded.
+		signingToken = "whsec_" + base64.StdEncoding.EncodeToString([]byte(signingToken))
+		keyPart = strings.TrimPrefix(signingToken, "whsec_")
+		key, _ = base64.StdEncoding.DecodeString(keyPart)
+	}
+	mac := hmac.New(sha256.New, key)
+	mac.Write([]byte(msgID + "." + ts + "." + string(payload)))
+	sig := "v1," + base64.StdEncoding.EncodeToString(mac.Sum(nil))
 	return plugintest.Request{
 		PathParams: map[string]string{"projectId": projectID},
 		Headers: map[string]string{
-			"X-Github-Event":      "workflow_run", // any type receiveWebhook doesn't specifically handle
-			"X-Hub-Signature-256": sig,
+			"X-Gitlab-Event":   "Pipeline Hook", // unhandled type — proves we passed signature check
+			"webhook-id":       msgID,
+			"webhook-timestamp": ts,
+			"webhook-signature": sig,
 		},
 		Body: payload,
 	}
@@ -459,21 +473,25 @@ func signedWebhookRequest(projectID string, payload []byte, secret string) plugi
 func seedEncryptedRepo(t *testing.T, tc *plugintest.Context, repoID, projectID, fullName, secret string) {
 	t.Helper()
 	tc.Config.Set("ENCRYPTION_KEY", testEncryptionKey)
+	// Persist as whsec_ signing token (same form createWebhook stores).
+	if !strings.HasPrefix(secret, "whsec_") {
+		secret = "whsec_" + base64.StdEncoding.EncodeToString([]byte(secret))
+	}
 	encSecret, err := encryptAES(secret, testEncryptionKey)
 	if err != nil {
 		t.Fatalf("failed to encrypt test secret: %v", err)
 	}
-	tc.DB.SeedRows("github_repositories",
+	tc.DB.SeedRows("gitlab_repositories",
 		[]string{"id", "project_id", "integration_id", "owner", "repo_name", "full_name",
 			"webhook_id", "webhook_secret_enc", "default_branch", "created_at", "updated_at"},
-		append(tc.DB.AllRows("github_repositories"), []any{
+		append(tc.DB.AllRows("gitlab_repositories"), []any{
 			repoID, projectID, "integration-1", "octocat", "hello-world", fullName,
 			"wh-1", encSecret, "main", "now", "now",
 		}))
 }
 
 // TestReceiveWebhook_ScopesRepositoryLookupToURLProject pins the fix for a
-// real cross-tenant interference bug: github_repositories.full_name is only
+// real cross-tenant interference bug: gitlab_repositories.full_name is only
 // unique per-project, so two projects can legitimately link the same repo.
 // The old lookup (`WHERE full_name = $1`, no project_id) could resolve to
 // whichever row Postgres happened to return first — using a DIFFERENT
@@ -489,7 +507,7 @@ func TestReceiveWebhook_ScopesRepositoryLookupToURLProject(t *testing.T) {
 	seedEncryptedRepo(t, tc, "repo-other", "other-project", "octocat/hello-world", "other-projects-secret")
 	seedEncryptedRepo(t, tc, "repo-mine", testProjectID, "octocat/hello-world", "my-projects-secret")
 
-	payload := []byte(`{"repository":{"full_name":"octocat/hello-world"}}`)
+	payload := []byte(`{"project":{"path_with_namespace":"octocat/hello-world"}}`)
 	res := tc.Call("POST", "/webhook", signedWebhookRequest(testProjectID, payload, "my-projects-secret"))
 	if res.StatusCode != 204 {
 		t.Fatalf("expected 204, got %d: %s", res.StatusCode, res.BodyString())
@@ -508,23 +526,28 @@ func TestReceiveWebhook_ScopesRepositoryLookupToURLProject(t *testing.T) {
 // refused instead, without ever reaching event dispatch.
 func TestReceiveWebhook_RejectsMissingSecret(t *testing.T) {
 	tc := setupPlugin(t)
-	tc.DB.SeedRows("github_repositories",
+	tc.DB.SeedRows("gitlab_repositories",
 		[]string{"id", "project_id", "integration_id", "owner", "repo_name", "full_name",
 			"webhook_id", "webhook_secret_enc", "default_branch", "created_at", "updated_at"},
 		[][]any{{"repo-1", testProjectID, "integration-1", "octocat", "hello-world", "octocat/hello-world",
 			"wh-1", "", "main", "now", "now"}})
 
-	payload := []byte(`{"repository":{"full_name":"octocat/hello-world"}}`)
+	payload := []byte(`{"project":{"path_with_namespace":"octocat/hello-world"}}`)
 	req := plugintest.Request{
 		PathParams: map[string]string{"projectId": testProjectID},
-		Headers:    map[string]string{"X-Github-Event": "workflow_run", "X-Hub-Signature-256": "sha256=deadbeef"},
-		Body:       payload,
+		Headers: map[string]string{
+			"X-Gitlab-Event":    "Pipeline Hook",
+			"webhook-id":        "msg_x",
+			"webhook-timestamp": "1",
+			"webhook-signature": "v1,deadbeef",
+		},
+		Body: payload,
 	}
 	res := tc.Call("POST", "/webhook", req)
 	if res.StatusCode != 204 {
 		t.Fatalf("expected 204, got %d: %s", res.StatusCode, res.BodyString())
 	}
-	if !tc.Log.HasMessage("no webhook secret configured") {
+	if !tc.Log.HasMessage("no webhook signing token configured") {
 		t.Fatalf("expected the missing-secret delivery to be refused before dispatch; log entries: %+v", tc.Log.Entries())
 	}
 	if tc.Log.HasMessage("unhandled event type") {

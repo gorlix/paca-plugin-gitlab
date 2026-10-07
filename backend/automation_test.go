@@ -7,9 +7,9 @@ import (
 	"github.com/Paca-AI/plugin-sdk-go/plugintest"
 )
 
-// These cover the paths reachable without an outbound GitHub API call:
-// config validation and "no PR linked to this task". The GitHub-API-backed
-// happy path (like other ghClient-dependent handlers in this plugin) isn't
+// These cover the paths reachable without an outbound GitLab API call:
+// config validation and "no PR linked to this task". The GitLab-API-backed
+// happy path (like other glClient-dependent handlers in this plugin) isn't
 // unit-testable outside a WASM build — see plugin_test.go's note on this.
 //
 // ProjectID is supplied the same way the host always supplies it — as a

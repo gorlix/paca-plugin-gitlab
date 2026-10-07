@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/url"
@@ -11,433 +13,432 @@ import (
 	plugin "github.com/Paca-AI/plugin-sdk-go"
 )
 
-const (
-	ghBaseURL    = "https://api.github.com"
-	ghAPIVersion = "2022-11-28"
-)
+const defaultGitLabInstance = "https://gitlab.com"
 
-// ghRepository is a minimal GitHub repository representation.
-type ghRepository struct {
-	ID       int64  `json:"id"`
-	FullName string `json:"full_name"`
-	Name     string `json:"name"`
-	Owner    struct {
-		Login string `json:"login"`
-	} `json:"owner"`
-	DefaultBranch string `json:"default_branch"`
-	Private       bool   `json:"private"`
+// glProject is a GitLab project (repository) representation.
+type glProject struct {
+	ID                int64  `json:"id"`
+	Name              string `json:"name"`
+	Path              string `json:"path"`
+	PathWithNamespace string `json:"path_with_namespace"`
+	DefaultBranch     string `json:"default_branch"`
+	Visibility        string `json:"visibility"`
+	WebURL            string `json:"web_url"`
+	HTTPURLToRepo     string `json:"http_url_to_repo"`
+	Namespace         struct {
+		FullPath string `json:"full_path"`
+		Path     string `json:"path"`
+	} `json:"namespace"`
 }
 
-// ghPullRequest is a minimal representation of a GitHub pull request.
-type ghPullRequest struct {
-	ID      int64  `json:"id"`
-	Number  int    `json:"number"`
-	Title   string `json:"title"`
-	State   string `json:"state"` // "open" | "closed"
-	HTMLURL string `json:"html_url"`
-	Head    struct {
-		Ref string `json:"ref"`
-		SHA string `json:"sha"`
-	} `json:"head"`
-	Base struct {
-		Ref string `json:"ref"`
-	} `json:"base"`
-	User struct {
-		Login string `json:"login"`
-	} `json:"user"`
-	Merged   bool       `json:"merged"`
-	MergedAt *time.Time `json:"merged_at"`
+func (p glProject) Private() bool {
+	return p.Visibility == "private" || p.Visibility == "internal"
 }
 
-// ghCombinedStatus is the response of GET /commits/{ref}/status — the legacy
-// Status API used by CI integrations that post plain commit statuses rather
-// than check runs (e.g. classic CircleCI/Travis integrations).
-type ghCombinedStatus struct {
-	State    string `json:"state"` // "pending" | "success" | "failure" | "error"
-	Statuses []struct {
-		Context     string `json:"context"`
-		State       string `json:"state"`
-		Description string `json:"description"`
-		TargetURL   string `json:"target_url"`
-	} `json:"statuses"`
+func (p glProject) Owner() string {
+	if p.Namespace.FullPath != "" {
+		return p.Namespace.FullPath
+	}
+	parts := strings.Split(p.PathWithNamespace, "/")
+	if len(parts) < 2 {
+		return ""
+	}
+	return strings.Join(parts[:len(parts)-1], "/")
 }
 
-// ghCheckRunsResponse is the response of GET /commits/{ref}/check-runs — the
-// modern Checks API used by GitHub Actions and most GitHub Apps.
-type ghCheckRunsResponse struct {
-	CheckRuns []struct {
-		Name       string  `json:"name"`
-		Status     string  `json:"status"`     // "queued" | "in_progress" | "completed"
-		Conclusion *string `json:"conclusion"` // "success" | "failure" | ... | null while not completed
-		HTMLURL    string  `json:"html_url"`
-	} `json:"check_runs"`
+// glMergeRequest is a GitLab merge request. Number maps to project-scoped iid.
+type glMergeRequest struct {
+	ID           int64  `json:"id"`
+	IID          int    `json:"iid"`
+	Title        string `json:"title"`
+	State        string `json:"state"` // opened | closed | merged | locked
+	WebURL       string `json:"web_url"`
+	SourceBranch string `json:"source_branch"`
+	TargetBranch string `json:"target_branch"`
+	Author       struct {
+		Username string `json:"username"`
+	} `json:"author"`
+	MergedAt    *time.Time `json:"merged_at"`
+	Description string     `json:"description"`
+	SHA         string     `json:"sha"`
 }
 
-// ghAPIError carries a non-2xx HTTP status and the GitHub error message.
-type ghAPIError struct {
+// Number returns the project-scoped iid (GitLab UI number).
+func (m glMergeRequest) Number() int { return m.IID }
+
+func (m glMergeRequest) NormalizedState() string {
+	switch strings.ToLower(m.State) {
+	case "opened", "open", "locked":
+		return "open"
+	case "merged":
+		return "merged"
+	case "closed":
+		return "closed"
+	default:
+		return strings.ToLower(m.State)
+	}
+}
+
+// glPipeline is a minimal pipeline summary for CI status.
+type glPipeline struct {
+	ID     int64  `json:"id"`
+	Status string `json:"status"`
+	WebURL string `json:"web_url"`
+	Name   string `json:"name"`
+	Ref    string `json:"ref"`
+	SHA    string `json:"sha"`
+}
+
+type glAPIError struct {
 	StatusCode int
 	Message    string
 	Details    string
 }
 
-func (e *ghAPIError) Error() string {
+func (e *glAPIError) Error() string {
 	if e.Details != "" {
-		return fmt.Sprintf("github: API error %d: %s (%s)", e.StatusCode, e.Message, e.Details)
+		return fmt.Sprintf("gitlab: API error %d: %s (%s)", e.StatusCode, e.Message, e.Details)
 	}
-	return fmt.Sprintf("github: API error %d: %s", e.StatusCode, e.Message)
+	return fmt.Sprintf("gitlab: API error %d: %s", e.StatusCode, e.Message)
 }
 
-// ghClient is a GitHub REST API v3 client authenticated via a PAT.
-// All outbound HTTP is proxied through the paca.fetch WASM host function,
-// which enforces domain allowlisting configured in plugin.json.
-type ghClient struct {
-	token string
+// glClient talks to a GitLab REST API v4 instance with a Personal, Project, or
+// Group Access Token (all use the same PRIVATE-TOKEN / Bearer auth).
+type glClient struct {
+	token    string
+	baseURL  string // e.g. https://gitlab.com/api/v4
+	hostURL  string // e.g. https://gitlab.com
 }
 
-func newGHClient(token string) *ghClient {
-	return &ghClient{token: token}
+func normalizeInstanceURL(raw string) string {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return defaultGitLabInstance
+	}
+	if !strings.HasPrefix(s, "http://") && !strings.HasPrefix(s, "https://") {
+		s = "https://" + s
+	}
+	return strings.TrimRight(s, "/")
 }
 
-func (c *ghClient) headers() map[string]string {
+func newGLClient(token, instanceURL string) *glClient {
+	host := normalizeInstanceURL(instanceURL)
+	return &glClient{
+		token:   token,
+		hostURL: host,
+		baseURL: host + "/api/v4",
+	}
+}
+
+func (c *glClient) headers() map[string]string {
 	return map[string]string{
-		"Authorization":        "Bearer " + c.token,
-		"Accept":               "application/vnd.github+json",
-		"X-GitHub-Api-Version": ghAPIVersion,
+		"PRIVATE-TOKEN": c.token,
+		"Accept":        "application/json",
 	}
 }
 
-func (c *ghClient) get(_ context.Context, rawURL string, out any) error {
+func (c *glClient) projectPath(owner, repo string) string {
+	full := strings.Trim(owner, "/") + "/" + strings.Trim(repo, "/")
+	return url.PathEscape(full) // encodes slash as %2F — required by GitLab
+}
+
+func (c *glClient) get(_ context.Context, rawURL string, out any) error {
 	resp, err := plugin.Fetch("GET", rawURL, c.headers(), "")
 	if err != nil {
-		return fmt.Errorf("githubclient: execute request: %w", err)
+		return fmt.Errorf("gitlabclient: execute request: %w", err)
 	}
 	if resp.Status >= 400 {
-		return ghParseAPIError(resp.Status, resp.Body)
+		return glParseAPIError(resp.Status, resp.Body)
 	}
 	if out != nil {
 		if err := json.Unmarshal([]byte(resp.Body), out); err != nil {
-			return fmt.Errorf("githubclient: decode response: %w", err)
+			return fmt.Errorf("gitlabclient: decode response: %w", err)
 		}
 	}
 	return nil
 }
 
-func (c *ghClient) post(_ context.Context, rawURL string, body, out any) error {
+func (c *glClient) post(_ context.Context, rawURL string, body, out any) error {
 	bodyJSON, err := json.Marshal(body)
 	if err != nil {
-		return fmt.Errorf("githubclient: encode body: %w", err)
+		return fmt.Errorf("gitlabclient: encode body: %w", err)
 	}
 	hdrs := c.headers()
 	hdrs["Content-Type"] = "application/json"
 	resp, err := plugin.Fetch("POST", rawURL, hdrs, string(bodyJSON))
 	if err != nil {
-		return fmt.Errorf("githubclient: execute request: %w", err)
+		return fmt.Errorf("gitlabclient: execute request: %w", err)
 	}
 	if resp.Status >= 400 {
-		return ghParseAPIError(resp.Status, resp.Body)
+		return glParseAPIError(resp.Status, resp.Body)
 	}
-	if out != nil {
+	if out != nil && strings.TrimSpace(resp.Body) != "" {
 		if err := json.Unmarshal([]byte(resp.Body), out); err != nil {
-			return fmt.Errorf("githubclient: decode response: %w", err)
+			return fmt.Errorf("gitlabclient: decode response: %w", err)
 		}
 	}
 	return nil
 }
 
-func (c *ghClient) doDelete(_ context.Context, rawURL string) error {
+func (c *glClient) put(_ context.Context, rawURL string, body, out any) error {
+	bodyJSON, err := json.Marshal(body)
+	if err != nil {
+		return fmt.Errorf("gitlabclient: encode body: %w", err)
+	}
+	hdrs := c.headers()
+	hdrs["Content-Type"] = "application/json"
+	resp, err := plugin.Fetch("PUT", rawURL, hdrs, string(bodyJSON))
+	if err != nil {
+		return fmt.Errorf("gitlabclient: execute request: %w", err)
+	}
+	if resp.Status >= 400 {
+		return glParseAPIError(resp.Status, resp.Body)
+	}
+	if out != nil && strings.TrimSpace(resp.Body) != "" {
+		if err := json.Unmarshal([]byte(resp.Body), out); err != nil {
+			return fmt.Errorf("gitlabclient: decode response: %w", err)
+		}
+	}
+	return nil
+}
+
+func (c *glClient) doDelete(_ context.Context, rawURL string) error {
 	resp, err := plugin.Fetch("DELETE", rawURL, c.headers(), "")
 	if err != nil {
-		return fmt.Errorf("githubclient: execute request: %w", err)
+		return fmt.Errorf("gitlabclient: execute request: %w", err)
 	}
 	if resp.Status == 404 || resp.Status == 204 {
 		return nil
 	}
 	if resp.Status >= 400 {
-		return ghParseAPIError(resp.Status, resp.Body)
+		return glParseAPIError(resp.Status, resp.Body)
 	}
 	return nil
 }
 
-func ghParseAPIError(statusCode int, body string) error {
+func glParseAPIError(statusCode int, body string) error {
 	var errBody struct {
-		Message string `json:"message"`
-		Errors  []struct {
-			Field   string `json:"field"`
-			Message string `json:"message"`
-		} `json:"errors"`
+		Message          any      `json:"message"`
+		Error            string   `json:"error"`
+		ErrorDescription string   `json:"error_description"`
 	}
 	_ = json.Unmarshal([]byte(body), &errBody)
-	if errBody.Message == "" {
-		errBody.Message = fmt.Sprintf("HTTP %d", statusCode)
-	}
-	details := make([]string, 0, len(errBody.Errors))
-	for _, e := range errBody.Errors {
-		msg := strings.TrimSpace(e.Message)
-		if msg == "" {
-			continue
+	msg := errBody.Error
+	if msg == "" {
+		switch v := errBody.Message.(type) {
+		case string:
+			msg = v
+		case map[string]any:
+			b, _ := json.Marshal(v)
+			msg = string(b)
+		default:
+			if errBody.ErrorDescription != "" {
+				msg = errBody.ErrorDescription
+			}
 		}
-		if e.Field != "" {
-			details = append(details, fmt.Sprintf("%s: %s", e.Field, msg))
-		} else {
-			details = append(details, msg)
-		}
 	}
-	return &ghAPIError{
-		StatusCode: statusCode,
-		Message:    errBody.Message,
-		Details:    strings.Join(details, "; "),
+	if msg == "" {
+		msg = fmt.Sprintf("HTTP %d", statusCode)
 	}
+	return &glAPIError{StatusCode: statusCode, Message: msg}
 }
 
 // ─── API methods ─────────────────────────────────────────────────────────────
 
-func (c *ghClient) validateToken(ctx context.Context) error {
+func (c *glClient) validateToken(ctx context.Context) error {
 	var user struct {
-		Login string `json:"login"`
+		ID       int64  `json:"id"`
+		Username string `json:"username"`
 	}
-	return c.get(ctx, ghBaseURL+"/user", &user)
+	return c.get(ctx, c.baseURL+"/user", &user)
 }
 
-func (c *ghClient) listRepositories(ctx context.Context) ([]ghRepository, error) {
-	seen := make(map[string]struct{})
-	var all []ghRepository
-
-	addRepo := func(r ghRepository) {
-		if _, ok := seen[r.FullName]; ok {
-			return
-		}
-		seen[r.FullName] = struct{}{}
-		all = append(all, r)
-	}
-
-	// 1. Repos directly accessible to the user (owned + collaborator + org member).
+func (c *glClient) listRepositories(ctx context.Context) ([]glProject, error) {
+	seen := make(map[int64]struct{})
+	var all []glProject
 	for page := 1; ; page++ {
-		url := fmt.Sprintf("%s/user/repos?visibility=all&affiliation=owner,collaborator,organization_member&per_page=100&page=%d", ghBaseURL, page)
-		var batch []ghRepository
-		if err := c.get(ctx, url, &batch); err != nil {
+		u := fmt.Sprintf("%s/projects?membership=true&simple=false&per_page=100&page=%d&order_by=updated_at&sort=desc", c.baseURL, page)
+		var batch []glProject
+		if err := c.get(ctx, u, &batch); err != nil {
 			return nil, err
 		}
-		for _, r := range batch {
-			addRepo(r)
+		for _, p := range batch {
+			if _, ok := seen[p.ID]; ok {
+				continue
+			}
+			seen[p.ID] = struct{}{}
+			all = append(all, p)
 		}
 		if len(batch) < 100 {
 			break
 		}
 	}
-
-	// 2. List all orgs the user belongs to, then fetch each org's repos
-	//    explicitly. This catches orgs where the membership is private or
-	//    where the token has "read:org" but not full org repo visibility.
-	var orgs []struct {
-		Login string `json:"login"`
-	}
-	for page := 1; ; page++ {
-		url := fmt.Sprintf("%s/user/orgs?per_page=100&page=%d", ghBaseURL, page)
-		var batch []struct {
-			Login string `json:"login"`
-		}
-		if err := c.get(ctx, url, &batch); err != nil {
-			// Non-fatal: proceed with what we have from /user/repos.
-			break
-		}
-		orgs = append(orgs, batch...)
-		if len(batch) < 100 {
-			break
-		}
-	}
-
-	for _, org := range orgs {
-		for page := 1; ; page++ {
-			url := fmt.Sprintf("%s/orgs/%s/repos?type=all&per_page=100&page=%d", ghBaseURL, org.Login, page)
-			var batch []ghRepository
-			if err := c.get(ctx, url, &batch); err != nil {
-				// Skip orgs where the token lacks access.
-				break
-			}
-			for _, r := range batch {
-				addRepo(r)
-			}
-			if len(batch) < 100 {
-				break
-			}
-		}
-	}
-
 	return all, nil
 }
 
-func (c *ghClient) getRepository(ctx context.Context, owner, repo string) (*ghRepository, error) {
-	url := fmt.Sprintf("%s/repos/%s/%s", ghBaseURL, owner, repo)
-	var r ghRepository
-	if err := c.get(ctx, url, &r); err != nil {
+func (c *glClient) getRepository(ctx context.Context, owner, repo string) (*glProject, error) {
+	u := fmt.Sprintf("%s/projects/%s", c.baseURL, c.projectPath(owner, repo))
+	var p glProject
+	if err := c.get(ctx, u, &p); err != nil {
 		return nil, err
 	}
-	return &r, nil
+	return &p, nil
 }
 
-func (c *ghClient) createWebhook(ctx context.Context, owner, repo, webhookURL, secret string, events []string) (int64, error) {
-	url := fmt.Sprintf("%s/repos/%s/%s/hooks", ghBaseURL, owner, repo)
+// generateSigningToken creates a Standard Webhooks-style signing token
+// (whsec_ + base64 of 32 random bytes) for GitLab 19+ project hooks.
+func generateSigningToken() (string, error) {
+	key := make([]byte, 32)
+	if _, err := rand.Read(key); err != nil {
+		return "", err
+	}
+	return "whsec_" + base64.StdEncoding.EncodeToString(key), nil
+}
+
+func (c *glClient) createWebhook(ctx context.Context, owner, repo, webhookURL, signingToken string) (int64, error) {
+	u := fmt.Sprintf("%s/projects/%s/hooks", c.baseURL, c.projectPath(owner, repo))
 	body := map[string]any{
-		"name":   "web",
-		"active": true,
-		"events": events,
-		"config": map[string]string{
-			"url":          webhookURL,
-			"content_type": "json",
-			"secret":       secret,
-		},
+		"url":                    webhookURL,
+		"push_events":            true,
+		"merge_requests_events":  true,
+		"pipeline_events":        true,
+		"enable_ssl_verification": true,
+		"signing_token":          signingToken,
 	}
 	var resp struct {
 		ID int64 `json:"id"`
 	}
-	if err := c.post(ctx, url, body, &resp); err != nil {
+	if err := c.post(ctx, u, body, &resp); err != nil {
 		return 0, err
 	}
 	return resp.ID, nil
 }
 
-func (c *ghClient) deleteWebhook(ctx context.Context, owner, repo string, hookID int64) error {
-	url := fmt.Sprintf("%s/repos/%s/%s/hooks/%d", ghBaseURL, owner, repo, hookID)
-	return c.doDelete(ctx, url)
+func (c *glClient) deleteWebhook(ctx context.Context, owner, repo string, hookID int64) error {
+	u := fmt.Sprintf("%s/projects/%s/hooks/%d", c.baseURL, c.projectPath(owner, repo), hookID)
+	return c.doDelete(ctx, u)
 }
 
-func (c *ghClient) getPullRequest(ctx context.Context, owner, repo string, prNumber int) (*ghPullRequest, error) {
-	url := fmt.Sprintf("%s/repos/%s/%s/pulls/%d", ghBaseURL, owner, repo, prNumber)
-	var pr ghPullRequest
-	if err := c.get(ctx, url, &pr); err != nil {
+func (c *glClient) getPullRequest(ctx context.Context, owner, repo string, mrIID int) (*glMergeRequest, error) {
+	u := fmt.Sprintf("%s/projects/%s/merge_requests/%d", c.baseURL, c.projectPath(owner, repo), mrIID)
+	var mr glMergeRequest
+	if err := c.get(ctx, u, &mr); err != nil {
 		return nil, err
 	}
-	return &pr, nil
+	return &mr, nil
 }
 
-func (c *ghClient) createPullRequest(ctx context.Context, owner, repo, title, head, base, body string) (*ghPullRequest, error) {
-	url := fmt.Sprintf("%s/repos/%s/%s/pulls", ghBaseURL, owner, repo)
-	reqBody := map[string]string{
-		"title": title,
-		"head":  head,
-		"base":  base,
+func (c *glClient) createPullRequest(ctx context.Context, owner, repo, title, sourceBranch, targetBranch, body string) (*glMergeRequest, error) {
+	u := fmt.Sprintf("%s/projects/%s/merge_requests", c.baseURL, c.projectPath(owner, repo))
+	reqBody := map[string]any{
+		"title":          title,
+		"source_branch":  sourceBranch,
+		"target_branch":  targetBranch,
 	}
 	if body != "" {
-		reqBody["body"] = body
+		reqBody["description"] = body
 	}
-	var pr ghPullRequest
-	if err := c.post(ctx, url, reqBody, &pr); err != nil {
+	var mr glMergeRequest
+	if err := c.post(ctx, u, reqBody, &mr); err != nil {
 		return nil, err
 	}
-	return &pr, nil
+	return &mr, nil
 }
 
-// mergePullRequest merges a pull request via PUT /pulls/{number}/merge.
-// mergeMethod is one of "merge" | "squash" | "rebase" (GitHub defaults to
-// "merge" if empty, but callers should always pass an explicit value).
-func (c *ghClient) mergePullRequest(ctx context.Context, owner, repo string, prNumber int, mergeMethod string) error {
-	url := fmt.Sprintf("%s/repos/%s/%s/pulls/%d/merge", ghBaseURL, owner, repo, prNumber)
-	body := map[string]string{"merge_method": mergeMethod}
-	bodyJSON, err := json.Marshal(body)
-	if err != nil {
-		return fmt.Errorf("githubclient: encode body: %w", err)
+func (c *glClient) mergePullRequest(ctx context.Context, owner, repo string, mrIID int, mergeMethod string) error {
+	u := fmt.Sprintf("%s/projects/%s/merge_requests/%d/merge", c.baseURL, c.projectPath(owner, repo), mrIID)
+	body := map[string]any{}
+	switch mergeMethod {
+	case "squash":
+		body["squash"] = true
+	case "rebase":
+		// GitLab merges after rebase when merge_when_pipeline_succeeds / FF settings allow;
+		// request squash=false and rely on project merge method when possible.
+		body["squash"] = false
+	default:
+		body["squash"] = false
 	}
-	hdrs := c.headers()
-	hdrs["Content-Type"] = "application/json"
-	resp, err := plugin.Fetch("PUT", url, hdrs, string(bodyJSON))
-	if err != nil {
-		return fmt.Errorf("githubclient: execute request: %w", err)
-	}
-	if resp.Status >= 400 {
-		return ghParseAPIError(resp.Status, resp.Body)
-	}
-	return nil
+	return c.put(ctx, u, body, nil)
 }
 
-// getPullRequestDiff fetches the unified diff for a pull request via GitHub's
-// diff media type. Unlike get(), the response body is raw diff text, not
-// JSON, so it bypasses get()'s json.Unmarshal step.
-func (c *ghClient) getPullRequestDiff(_ context.Context, owner, repo string, prNumber int) (string, error) {
-	url := fmt.Sprintf("%s/repos/%s/%s/pulls/%d", ghBaseURL, owner, repo, prNumber)
-	hdrs := c.headers()
-	hdrs["Accept"] = "application/vnd.github.v3.diff"
-	resp, err := plugin.Fetch("GET", url, hdrs, "")
-	if err != nil {
-		return "", fmt.Errorf("githubclient: execute request: %w", err)
+func (c *glClient) getPullRequestDiff(ctx context.Context, owner, repo string, mrIID int) (string, error) {
+	u := fmt.Sprintf("%s/projects/%s/merge_requests/%d/changes", c.baseURL, c.projectPath(owner, repo), mrIID)
+	var resp struct {
+		Changes []struct {
+			OldPath string `json:"old_path"`
+			NewPath string `json:"new_path"`
+			Diff    string `json:"diff"`
+		} `json:"changes"`
 	}
-	if resp.Status >= 400 {
-		return "", ghParseAPIError(resp.Status, resp.Body)
+	if err := c.get(ctx, u, &resp); err != nil {
+		return "", err
 	}
-	return resp.Body, nil
+	var b strings.Builder
+	for _, ch := range resp.Changes {
+		fmt.Fprintf(&b, "--- a/%s\n+++ b/%s\n%s\n", ch.OldPath, ch.NewPath, ch.Diff)
+	}
+	return b.String(), nil
 }
 
-// createPullRequestReview submits a review on a pull request. event must be
-// one of "APPROVE", "REQUEST_CHANGES", or "COMMENT" (GitHub requires a
-// non-empty body for the latter two).
-func (c *ghClient) createPullRequestReview(ctx context.Context, owner, repo string, prNumber int, event, body string) error {
-	url := fmt.Sprintf("%s/repos/%s/%s/pulls/%d/reviews", ghBaseURL, owner, repo, prNumber)
-	reqBody := map[string]string{"event": event}
-	if body != "" {
-		reqBody["body"] = body
+// createPullRequestReview maps GitHub-style review events onto GitLab:
+// COMMENT → MR note; APPROVE → approvals API; REQUEST_CHANGES → blocking-style note + unapprove.
+func (c *glClient) createPullRequestReview(ctx context.Context, owner, repo string, mrIID int, event, body string) error {
+	switch strings.ToUpper(event) {
+	case "APPROVE":
+		if body != "" {
+			_ = c.createIssueComment(ctx, owner, repo, mrIID, body)
+		}
+		u := fmt.Sprintf("%s/projects/%s/merge_requests/%d/approve", c.baseURL, c.projectPath(owner, repo), mrIID)
+		return c.post(ctx, u, map[string]any{}, nil)
+	case "REQUEST_CHANGES":
+		note := body
+		if note == "" {
+			note = "Changes requested."
+		} else {
+			note = "**Changes requested**\n\n" + note
+		}
+		if err := c.createIssueComment(ctx, owner, repo, mrIID, note); err != nil {
+			return err
+		}
+		// Best-effort: remove prior approval so the MR is no longer approved.
+		u := fmt.Sprintf("%s/projects/%s/merge_requests/%d/unapprove", c.baseURL, c.projectPath(owner, repo), mrIID)
+		_ = c.post(ctx, u, map[string]any{}, nil)
+		return nil
+	case "COMMENT":
+		return c.createIssueComment(ctx, owner, repo, mrIID, body)
+	default:
+		return fmt.Errorf("gitlabclient: unsupported review event %q", event)
 	}
-	return c.post(ctx, url, reqBody, nil)
 }
 
-// createIssueComment adds a general (non-review) comment to a pull request.
-// GitHub represents PR comments as issue comments under /issues/{number}/comments.
-func (c *ghClient) createIssueComment(ctx context.Context, owner, repo string, prNumber int, body string) error {
-	url := fmt.Sprintf("%s/repos/%s/%s/issues/%d/comments", ghBaseURL, owner, repo, prNumber)
-	return c.post(ctx, url, map[string]string{"body": body}, nil)
+func (c *glClient) createIssueComment(ctx context.Context, owner, repo string, mrIID int, body string) error {
+	u := fmt.Sprintf("%s/projects/%s/merge_requests/%d/notes", c.baseURL, c.projectPath(owner, repo), mrIID)
+	return c.post(ctx, u, map[string]string{"body": body}, nil)
 }
 
-// getCombinedStatus fetches legacy commit statuses posted for ref (a SHA,
-// branch, or tag name).
-func (c *ghClient) getCombinedStatus(ctx context.Context, owner, repo, ref string) (*ghCombinedStatus, error) {
-	url := fmt.Sprintf("%s/repos/%s/%s/commits/%s/status", ghBaseURL, owner, repo, ref)
-	var status ghCombinedStatus
-	if err := c.get(ctx, url, &status); err != nil {
+func (c *glClient) listMergeRequestPipelines(ctx context.Context, owner, repo string, mrIID int) ([]glPipeline, error) {
+	u := fmt.Sprintf("%s/projects/%s/merge_requests/%d/pipelines", c.baseURL, c.projectPath(owner, repo), mrIID)
+	var pipelines []glPipeline
+	if err := c.get(ctx, u, &pipelines); err != nil {
 		return nil, err
 	}
-	return &status, nil
+	return pipelines, nil
 }
 
-// getCheckRuns fetches check runs (GitHub Actions and other Checks-API-based
-// CI) for ref (a SHA, branch, or tag name).
-func (c *ghClient) getCheckRuns(ctx context.Context, owner, repo, ref string) (*ghCheckRunsResponse, error) {
-	url := fmt.Sprintf("%s/repos/%s/%s/commits/%s/check-runs", ghBaseURL, owner, repo, ref)
-	var result ghCheckRunsResponse
-	if err := c.get(ctx, url, &result); err != nil {
-		return nil, err
-	}
-	return &result, nil
+func (c *glClient) branchExists(ctx context.Context, owner, repo, branch string) error {
+	u := fmt.Sprintf("%s/projects/%s/repository/branches/%s",
+		c.baseURL, c.projectPath(owner, repo), url.PathEscape(branch))
+	return c.get(ctx, u, &struct{}{})
 }
 
-// ghBranchHeadRefURL builds GET /repos/{owner}/{repo}/git/ref/heads/{branch}.
-// Branch names may contain slashes (e.g. fix/foo); encode the ref segment so
-// the path is not split into extra URL segments.
-func ghBranchHeadRefURL(owner, repo, branch string) string {
-	return fmt.Sprintf(
-		"%s/repos/%s/%s/git/ref/heads/%s",
-		ghBaseURL,
-		url.PathEscape(owner),
-		url.PathEscape(repo),
-		url.PathEscape(branch),
-	)
-}
-
-func (c *ghClient) branchExists(ctx context.Context, owner, repo, branch string) error {
-	return c.get(ctx, ghBranchHeadRefURL(owner, repo, branch), &struct{}{})
-}
-
-func (c *ghClient) createBranch(ctx context.Context, owner, repo, newBranch, sourceBranch string) error {
-	refURL := ghBranchHeadRefURL(owner, repo, sourceBranch)
-	var refResp struct {
-		Object struct {
-			SHA string `json:"sha"`
-		} `json:"object"`
-	}
-	if err := c.get(ctx, refURL, &refResp); err != nil {
-		return fmt.Errorf("resolve source branch %q: %w", sourceBranch, err)
-	}
-
-	createURL := fmt.Sprintf("%s/repos/%s/%s/git/refs", ghBaseURL, url.PathEscape(owner), url.PathEscape(repo))
-	return c.post(ctx, createURL, map[string]string{
-		"ref": "refs/heads/" + newBranch,
-		"sha": refResp.Object.SHA,
+func (c *glClient) createBranch(ctx context.Context, owner, repo, newBranch, sourceBranch string) error {
+	u := fmt.Sprintf("%s/projects/%s/repository/branches", c.baseURL, c.projectPath(owner, repo))
+	return c.post(ctx, u, map[string]string{
+		"branch": newBranch,
+		"ref":    sourceBranch,
 	}, nil)
+}
+
+func (c *glClient) cloneURL(pathWithNamespace string) string {
+	return c.hostURL + "/" + strings.Trim(pathWithNamespace, "/") + ".git"
 }

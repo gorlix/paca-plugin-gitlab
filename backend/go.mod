@@ -1,4 +1,4 @@
-module github.com/Paca-AI/first-party/github
+module github.com/Paca-AI/first-party/gitlab
 
 go 1.24
 

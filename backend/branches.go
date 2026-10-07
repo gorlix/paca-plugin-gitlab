@@ -24,7 +24,7 @@ type createBranchResponse struct {
 
 // ─── POST /tasks/:taskId/github/branches ──────────────────────────────────────
 
-func (p *githubPlugin) createBranch(req *plugin.Request, res *plugin.Response) {
+func (p *gitlabPlugin) createBranch(req *plugin.Request, res *plugin.Response) {
 	projectID := req.Caller.ProjectID
 	taskID := req.PathParam("taskId")
 	if !p.taskBelongsToProject(taskID, projectID, res) {
@@ -42,7 +42,7 @@ func (p *githubPlugin) createBranch(req *plugin.Request, res *plugin.Response) {
 		return
 	}
 
-	token, err := p.decryptToken(projectID)
+	ghc, err := p.clientForProject(projectID)
 	if err != nil {
 		writeAppError(res, err)
 		return
@@ -50,7 +50,7 @@ func (p *githubPlugin) createBranch(req *plugin.Request, res *plugin.Response) {
 
 	// Get repository details.
 	repoResult, rErr := p.db.Query(
-		`SELECT owner, repo_name, default_branch FROM github_repositories WHERE id = $1 AND project_id = $2`,
+		`SELECT owner, repo_name, default_branch FROM gitlab_repositories WHERE id = $1 AND project_id = $2`,
 		b.RepoID, projectID,
 	)
 	if rErr != nil {
@@ -58,7 +58,7 @@ func (p *githubPlugin) createBranch(req *plugin.Request, res *plugin.Response) {
 		return
 	}
 	if len(repoResult.Rows) == 0 {
-		apiError(res, 404, "GITHUB_REPOSITORY_NOT_FOUND", "Repository not found")
+		apiError(res, 404, "GITLAB_REPOSITORY_NOT_FOUND", "Repository not found")
 		return
 	}
 	rSc := newRowScanner(repoResult.Columns, repoResult.Rows[0])
@@ -71,15 +71,14 @@ func (p *githubPlugin) createBranch(req *plugin.Request, res *plugin.Response) {
 		sourceBranch = defaultBranch
 	}
 
-	ghc := newGHClient(token)
 	if err := ghc.createBranch(context.Background(), owner, repoName, b.BranchName, sourceBranch); err != nil {
-		var apiErr *ghAPIError
+		var apiErr *glAPIError
 		if errors.As(err, &apiErr) {
 			if apiErr.StatusCode == 403 {
-				apiError(res, 403, "GITHUB_TOKEN_INSUFFICIENT_PERMISSIONS", "Token does not have permission to create branches")
+				apiError(res, 403, "GITLAB_TOKEN_INSUFFICIENT_PERMISSIONS", "Token does not have permission to create branches")
 				return
 			}
-			apiError(res, 400, "BAD_REQUEST", fmt.Sprintf("GitHub API error: %s", apiErr.Message))
+			apiError(res, 400, "BAD_REQUEST", fmt.Sprintf("GitLab API error: %s", apiErr.Message))
 			return
 		}
 		apiError(res, 502, "INTERNAL_ERROR", fmt.Sprintf("failed to create branch: %s", err))
@@ -89,18 +88,18 @@ func (p *githubPlugin) createBranch(req *plugin.Request, res *plugin.Response) {
 	// Link the branch to the task.
 	now := nowStr()
 	rowsAffected, dbErr := p.db.Exec(`
-		INSERT INTO github_task_branches (task_id, repo_id, branch_name, created_at)
+		INSERT INTO gitlab_task_branches (task_id, repo_id, branch_name, created_at)
 		VALUES ($1,$2,$3,$4)
 		ON CONFLICT (task_id, repo_id, branch_name) DO NOTHING
 	`, taskID, b.RepoID, b.BranchName, now)
 	if dbErr != nil {
 		p.log.Error("failed to link branch to task: " + dbErr.Error())
 	} else if rowsAffected == 0 {
-		apiError(res, 409, "GITHUB_BRANCH_ALREADY_LINKED", "Branch is already linked to this task")
+		apiError(res, 409, "GITLAB_BRANCH_ALREADY_LINKED", "Branch is already linked to this task")
 		return
 	}
 
-	plugin.EmitEvent("github.branch_linked", map[string]any{
+	plugin.EmitEvent("gitlab.branch_linked", map[string]any{
 		"project_id":  projectID,
 		"task_id":     taskID,
 		"repo_id":     b.RepoID,
@@ -112,7 +111,7 @@ func (p *githubPlugin) createBranch(req *plugin.Request, res *plugin.Response) {
 
 // ─── POST /tasks/:taskId/branches/link ────────────────────────────────────────
 
-func (p *githubPlugin) linkBranchToTask(req *plugin.Request, res *plugin.Response) {
+func (p *gitlabPlugin) linkBranchToTask(req *plugin.Request, res *plugin.Response) {
 	projectID := req.Caller.ProjectID
 	taskID := req.PathParam("taskId")
 	if !p.taskBelongsToProject(taskID, projectID, res) {
@@ -129,14 +128,14 @@ func (p *githubPlugin) linkBranchToTask(req *plugin.Request, res *plugin.Respons
 		return
 	}
 
-	token, err := p.decryptToken(projectID)
+	ghc, err := p.clientForProject(projectID)
 	if err != nil {
 		writeAppError(res, err)
 		return
 	}
 
 	repoResult, rErr := p.db.Query(
-		`SELECT owner, repo_name FROM github_repositories WHERE id = $1 AND project_id = $2`,
+		`SELECT owner, repo_name FROM gitlab_repositories WHERE id = $1 AND project_id = $2`,
 		b.RepoID, projectID,
 	)
 	if rErr != nil {
@@ -144,24 +143,23 @@ func (p *githubPlugin) linkBranchToTask(req *plugin.Request, res *plugin.Respons
 		return
 	}
 	if len(repoResult.Rows) == 0 {
-		apiError(res, 404, "GITHUB_REPOSITORY_NOT_FOUND", "Repository not found")
+		apiError(res, 404, "GITLAB_REPOSITORY_NOT_FOUND", "Repository not found")
 		return
 	}
 	rSc := newRowScanner(repoResult.Columns, repoResult.Rows[0])
 	owner := rSc.str("owner")
 	repoName := rSc.str("repo_name")
 
-	ghc := newGHClient(token)
 	if err := ghc.branchExists(context.Background(), owner, repoName, b.BranchName); err != nil {
-		var apiErr *ghAPIError
+		var apiErr *glAPIError
 		if errors.As(err, &apiErr) {
 			if apiErr.StatusCode == 404 {
-				apiError(res, 404, "GITHUB_BRANCH_NOT_FOUND",
+				apiError(res, 404, "GITLAB_BRANCH_NOT_FOUND",
 					fmt.Sprintf("Branch %q not found in %s/%s", b.BranchName, owner, repoName))
 				return
 			}
 			if apiErr.StatusCode == 403 {
-				apiError(res, 403, "GITHUB_TOKEN_INSUFFICIENT_PERMISSIONS", "Token does not have permission to read branches")
+				apiError(res, 403, "GITLAB_TOKEN_INSUFFICIENT_PERMISSIONS", "Token does not have permission to read branches")
 				return
 			}
 		}
@@ -171,7 +169,7 @@ func (p *githubPlugin) linkBranchToTask(req *plugin.Request, res *plugin.Respons
 
 	now := nowStr()
 	inserted, dbErr := p.db.Query(`
-		INSERT INTO github_task_branches (task_id, repo_id, branch_name, created_at)
+		INSERT INTO gitlab_task_branches (task_id, repo_id, branch_name, created_at)
 		VALUES ($1,$2,$3,$4)
 		ON CONFLICT (task_id, repo_id, branch_name) DO NOTHING
 		RETURNING id, task_id, repo_id, branch_name, created_at
@@ -181,11 +179,11 @@ func (p *githubPlugin) linkBranchToTask(req *plugin.Request, res *plugin.Respons
 		return
 	}
 	if len(inserted.Rows) == 0 {
-		apiError(res, 409, "GITHUB_BRANCH_ALREADY_LINKED", "Branch is already linked to this task")
+		apiError(res, 409, "GITLAB_BRANCH_ALREADY_LINKED", "Branch is already linked to this task")
 		return
 	}
 
-	plugin.EmitEvent("github.branch_linked", map[string]any{
+	plugin.EmitEvent("gitlab.branch_linked", map[string]any{
 		"project_id":  projectID,
 		"task_id":     taskID,
 		"repo_id":     b.RepoID,
@@ -204,7 +202,7 @@ func (p *githubPlugin) linkBranchToTask(req *plugin.Request, res *plugin.Respons
 
 // ─── GET /tasks/:taskId/github/branches ───────────────────────────────────────
 
-func (p *githubPlugin) listTaskBranches(req *plugin.Request, res *plugin.Response) {
+func (p *gitlabPlugin) listTaskBranches(req *plugin.Request, res *plugin.Response) {
 	projectID := req.Caller.ProjectID
 	taskID := req.PathParam("taskId")
 	if !p.taskBelongsToProject(taskID, projectID, res) {
@@ -212,7 +210,7 @@ func (p *githubPlugin) listTaskBranches(req *plugin.Request, res *plugin.Respons
 	}
 
 	result, err := p.db.Query(
-		`SELECT id, task_id, repo_id, branch_name, created_at FROM github_task_branches WHERE task_id = $1 ORDER BY created_at ASC`,
+		`SELECT id, task_id, repo_id, branch_name, created_at FROM gitlab_task_branches WHERE task_id = $1 ORDER BY created_at ASC`,
 		taskID,
 	)
 	if err != nil {
@@ -220,8 +218,8 @@ func (p *githubPlugin) listTaskBranches(req *plugin.Request, res *plugin.Respons
 		return
 	}
 
-	// github_task_branches has no project_id column of its own — only
-	// repo_id, which links to github_repositories (which does). Re-verify
+	// gitlab_task_branches has no project_id column of its own — only
+	// repo_id, which links to gitlab_repositories (which does). Re-verify
 	// each branch's repo against the caller's project as defense-in-depth:
 	// taskBelongsToProject above already closes the main vector (a foreign
 	// taskId), but this also protects against any row a pre-fix caller
@@ -233,7 +231,7 @@ func (p *githubPlugin) listTaskBranches(req *plugin.Request, res *plugin.Respons
 		sc := newRowScanner(result.Columns, row)
 		repoID := sc.str("repo_id")
 		repoResult, rErr := p.db.Query(
-			`SELECT id FROM github_repositories WHERE id = $1 AND project_id = $2`,
+			`SELECT id FROM gitlab_repositories WHERE id = $1 AND project_id = $2`,
 			repoID, projectID,
 		)
 		if rErr != nil {

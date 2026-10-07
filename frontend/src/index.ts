@@ -1,2 +1,2 @@
-export { default as GitHubSettingsTab } from "./GitHubSettingsTab";
-export { default as GitHubTaskSection } from "./GitHubTaskSection";
+export { default as GitLabSettingsTab } from "./GitLabSettingsTab";
+export { default as GitLabTaskSection } from "./GitLabTaskSection";

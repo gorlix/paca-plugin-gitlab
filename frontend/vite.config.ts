@@ -6,11 +6,11 @@ export default defineConfig({
   plugins: [
     react(),
     federation({
-      name: "com_paca_github",
+      name: "com_paca_gitlab",
       filename: "remoteEntry.js",
       exposes: {
-        "./GitHubSettingsTab": "./src/GitHubSettingsTab.tsx",
-        "./GitHubTaskSection": "./src/GitHubTaskSection.tsx",
+        "./GitLabSettingsTab": "./src/GitLabSettingsTab.tsx",
+        "./GitLabTaskSection": "./src/GitLabTaskSection.tsx",
       },
       shared: {
         react: { requiredVersion: "^19.0.0" },

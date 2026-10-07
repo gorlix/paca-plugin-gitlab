@@ -1,5 +1,5 @@
 {
-  "name": "@paca-ai/github-plugin",
+  "name": "@paca-ai/gitlab-plugin",
   "version": "0.1.0",
   "private": true,
   "type": "module",

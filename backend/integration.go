@@ -103,14 +103,6 @@ func (p *gitlabPlugin) loadCreds(projectID string) (*gitlabCreds, error) {
 	return &gitlabCreds{Token: token, InstanceURL: instance, TokenKind: kind}, nil
 }
 
-func (p *gitlabPlugin) decryptToken(projectID string) (string, error) {
-	c, err := p.loadCreds(projectID)
-	if err != nil {
-		return "", err
-	}
-	return c.Token, nil
-}
-
 func (p *gitlabPlugin) clientForProject(projectID string) (*glClient, error) {
 	c, err := p.loadCreds(projectID)
 	if err != nil {

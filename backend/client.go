@@ -442,31 +442,3 @@ func (c *glClient) createBranch(ctx context.Context, owner, repo, newBranch, sou
 func (c *glClient) cloneURL(pathWithNamespace string) string {
 	return c.hostURL + "/" + strings.Trim(pathWithNamespace, "/") + ".git"
 }
-
-// Compatibility aliases used by handlers still naming GitHub types in local vars.
-type ghPullRequest = glMergeRequest
-type ghRepository struct {
-	ID            int64
-	FullName      string
-	Name          string
-	DefaultBranch string
-	Private       bool
-	Owner         struct{ Login string }
-	HTTPURLToRepo string
-}
-
-func glProjectToGHCompat(p *glProject) *ghRepository {
-	if p == nil {
-		return nil
-	}
-	r := &ghRepository{
-		ID:            p.ID,
-		FullName:      p.PathWithNamespace,
-		Name:          p.Path,
-		DefaultBranch: p.DefaultBranch,
-		Private:       p.Private(),
-		HTTPURLToRepo: p.HTTPURLToRepo,
-	}
-	r.Owner.Login = p.Owner()
-	return r
-}

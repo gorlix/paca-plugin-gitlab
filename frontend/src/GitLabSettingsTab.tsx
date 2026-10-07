@@ -19,20 +19,22 @@ import { useMemo, useState } from "react";
 import {
   type AccessibleRepo,
   accessibleReposKey,
-  deleteGitHubToken,
+  deleteGitLabToken,
   ErrorCode,
   getPluginErrorCode,
-  type GitHubIntegration,
-  getGitHubIntegration,
+  type GitLabIntegration,
+  type GitLabTokenKind,
+  getGitLabIntegration,
   integrationKey,
   type LinkedRepository,
   linkedReposKey,
   listAccessibleRepos,
   listLinkedRepositories,
   linkRepository,
-  setGitHubToken,
+  setGitLabToken,
   unlinkRepository,
-} from "./github-api";
+} from "./gitlab-api";
+import { t } from "./i18n";
 
 // ── Utilities ──────────────────────────────────────────────────────────────────
 
@@ -40,12 +42,12 @@ function cn(...classes: (string | undefined | null | false)[]): string {
   return classes.filter(Boolean).join(" ");
 }
 
-// ── GitHub Icon ────────────────────────────────────────────────────────────────
+// ── GitLab Icon ────────────────────────────────────────────────────────────────
 
-function GitHubIcon(props: React.SVGProps<SVGSVGElement>) {
+function GitLabIcon(props: React.SVGProps<SVGSVGElement>) {
   return (
     <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" {...props}>
-      <title>GitHub</title>
+      <title>GitLab</title>
       <path
         fill="currentColor"
         d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z"
@@ -162,21 +164,35 @@ function TokenCard({
   hasIntegration,
   onTokenSet,
   canEdit,
+  locale,
+  integration,
 }: {
   api: PluginApiClient;
   projectId: string;
   hasIntegration: boolean;
   onTokenSet: () => void;
   canEdit: boolean;
+  locale?: string;
+  integration?: GitLabIntegration | null;
 }) {
   const queryClient = useQueryClient();
   const [token, setToken] = useState("");
+  const [instanceUrl, setInstanceUrl] = useState(
+    integration?.instance_url || "https://gitlab.com",
+  );
+  const [tokenKind, setTokenKind] = useState<GitLabTokenKind>(
+    integration?.token_kind || "personal",
+  );
   const [showToken, setShowToken] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [confirmOpen, setConfirmOpen] = useState(false);
 
   const saveMutation = useMutation({
-    mutationFn: () => setGitHubToken(api, token.trim()),
+    mutationFn: () =>
+      setGitLabToken(api, token.trim(), {
+        instanceUrl: instanceUrl.trim(),
+        tokenKind,
+      }),
     onSuccess: async () => {
       await queryClient.invalidateQueries({
         queryKey: integrationKey(projectId),
@@ -187,18 +203,16 @@ function TokenCard({
     },
     onError: (err: unknown) => {
       const code = getPluginErrorCode(err);
-      if (code === ErrorCode.GitHubInvalidToken) {
-        setError(
-          "GitHub rejected the token. Check it has the required scopes (repo, pull request, admin:repo_hook).",
-        );
+      if (code === ErrorCode.GitLabInvalidToken) {
+        setError(t("settings.token.invalid", locale));
         return;
       }
-      setError("Failed to save token. Please try again.");
+      setError(t("settings.token.saveFailed", locale));
     },
   });
 
   const deleteMutation = useMutation({
-    mutationFn: () => deleteGitHubToken(api),
+    mutationFn: () => deleteGitLabToken(api),
     onSuccess: async () => {
       await queryClient.invalidateQueries({
         queryKey: integrationKey(projectId),
@@ -255,7 +269,7 @@ function TokenCard({
               <KeyRound className="size-5 text-destructive" />
             </div>
             <h2 className="text-base font-semibold leading-none mb-1.5">
-              Remove GitHub token
+              Remove GitLab token
             </h2>
             <p className="text-sm text-muted-foreground mb-4">
               Removing the token will also unlink all repositories and disable
@@ -298,67 +312,85 @@ function TokenCard({
   }
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-4 max-w-lg">
       <p className="text-sm text-muted-foreground">
-        Add a GitHub personal access token with{" "}
-        <code className="rounded bg-muted px-1 py-0.5 text-xs font-mono">
-          repo
-        </code>{" "}
-        (includes{" "}
-        <code className="rounded bg-muted px-1 py-0.5 text-xs font-mono">
-          contents
-        </code>{" "}
-        and{" "}
-        <code className="rounded bg-muted px-1 py-0.5 text-xs font-mono">
-          pull requests
-        </code>{" "}
-        permissions) and the{" "}
-        <code className="rounded bg-muted px-1 py-0.5 text-xs font-mono">
-          admin:repo_hook
-        </code>{" "}
-        scope to link repositories, create branches, and track pull requests.
+        {t("settings.instanceUrl.hint", locale)}. Use a Personal, Project, or
+        Group Access Token with scope{" "}
+        <code className="rounded bg-muted px-1 py-0.5 text-xs font-mono">api</code>{" "}
+        (Maintainer/Owner required to create project webhooks).
       </p>
-      <div className="flex gap-2 max-w-lg">
-        <div className="flex-1 relative">
-          <Inp
-            type={showToken ? "text" : "password"}
-            value={token}
-            onChange={(e) => {
-              setToken(e.target.value);
-              setError(null);
-            }}
-            placeholder="ghp_xxxxxxxxxxxxxxxxxxxx"
-            disabled={!canEdit || saveMutation.isPending}
-            className={cn(
-              "pr-8 font-mono text-sm",
-              error ? "border-destructive focus-visible:ring-destructive/30" : "",
-            )}
-            autoComplete="off"
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && token.trim()) saveMutation.mutate();
-            }}
-          />
-          <button
-            type="button"
-            className="absolute right-2.5 top-1/2 -translate-y-1/2 text-muted-foreground/60 hover:text-muted-foreground text-xs font-medium"
-            onClick={() => setShowToken((v) => !v)}
-            tabIndex={-1}
-          >
-            {showToken ? "hide" : "show"}
-          </button>
-        </div>
-        <Btn
-          size="sm"
-          disabled={!token.trim() || !canEdit || saveMutation.isPending}
-          onClick={() => saveMutation.mutate()}
-          className="shrink-0"
+      <label className="block space-y-1.5">
+        <span className="text-xs font-medium text-muted-foreground">
+          {t("settings.instanceUrl", locale)}
+        </span>
+        <Inp
+          value={instanceUrl}
+          onChange={(e) => setInstanceUrl(e.target.value)}
+          placeholder="https://gitlab.com"
+          disabled={!canEdit || saveMutation.isPending}
+        />
+      </label>
+      <label className="block space-y-1.5">
+        <span className="text-xs font-medium text-muted-foreground">
+          {t("settings.token.kind", locale)}
+        </span>
+        <select
+          className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+          value={tokenKind}
+          disabled={!canEdit || saveMutation.isPending}
+          onChange={(e) => setTokenKind(e.target.value as GitLabTokenKind)}
         >
-          {saveMutation.isPending ? (
-            <Loader2 className="size-3.5 animate-spin" />
-          ) : null}
-          Save token
-        </Btn>
-      </div>
+          <option value="personal">{t("settings.token.kind.personal", locale)}</option>
+          <option value="project">{t("settings.token.kind.project", locale)}</option>
+          <option value="group">{t("settings.token.kind.group", locale)}</option>
+        </select>
+      </label>
+      <label className="block space-y-1.5">
+        <span className="text-xs font-medium text-muted-foreground">
+          {t("settings.token.label", locale)}
+        </span>
+        <div className="flex gap-2">
+          <div className="flex-1 relative">
+            <Inp
+              type={showToken ? "text" : "password"}
+              value={token}
+              onChange={(e) => {
+                setToken(e.target.value);
+                setError(null);
+              }}
+              placeholder={t("settings.token.placeholder", locale)}
+              disabled={!canEdit || saveMutation.isPending}
+              className={cn(
+                "pr-8 font-mono text-sm",
+                error ? "border-destructive focus-visible:ring-destructive/30" : "",
+              )}
+              autoComplete="off"
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && token.trim()) saveMutation.mutate();
+              }}
+            />
+            <button
+              type="button"
+              className="absolute right-2.5 top-1/2 -translate-y-1/2 text-muted-foreground/60 hover:text-muted-foreground text-xs font-medium"
+              onClick={() => setShowToken((v) => !v)}
+              tabIndex={-1}
+            >
+              {showToken ? "hide" : "show"}
+            </button>
+          </div>
+          <Btn
+            size="sm"
+            disabled={!token.trim() || !canEdit || saveMutation.isPending}
+            onClick={() => saveMutation.mutate()}
+            className="shrink-0"
+          >
+            {saveMutation.isPending ? (
+              <Loader2 className="size-3.5 animate-spin" />
+            ) : null}
+            {t("settings.token.save", locale)}
+          </Btn>
+        </div>
+      </label>
       {error ? <p className="text-xs text-destructive">{error}</p> : null}
     </div>
   );
@@ -403,23 +435,23 @@ function AddRepoDialog({
     },
     onError: (err: unknown) => {
       const code = getPluginErrorCode(err);
-      if (code === ErrorCode.GitHubWebhookURLNotPublic) {
+      if (code === ErrorCode.GitLabWebhookURLNotPublic) {
         setError(
           "Cannot register webhook because this API URL is not publicly reachable (for example localhost). Configure PUBLIC_URL to a public HTTPS URL and try again.",
         );
         return;
       }
-      if (code === ErrorCode.GitHubWebhookCreationFailed) {
+      if (code === ErrorCode.GitLabWebhookCreationFailed) {
         setError(
           "Could not create the webhook. Make sure your token has the admin:repo_hook scope and you have admin access to the repository.",
         );
         return;
       }
-      if (code === ErrorCode.GitHubRepoAlreadyLinked) {
+      if (code === ErrorCode.GitLabRepoAlreadyLinked) {
         setError("This repository is already linked to the project.");
         return;
       }
-      if (code === ErrorCode.GitHubRepoNotAccessible) {
+      if (code === ErrorCode.GitLabRepoNotAccessible) {
         setError(
           "Repository not found or not accessible. Check that your token has the repo scope.",
         );
@@ -451,7 +483,7 @@ function AddRepoDialog({
           <h2 className="text-base font-semibold">Add repository</h2>
         </div>
         <p className="text-sm text-muted-foreground mb-4">
-          Select a repository from your GitHub account to link to this project.
+          Select a repository from your GitLab account to link to this project.
           A webhook will be registered automatically.
         </p>
 
@@ -598,7 +630,7 @@ function LinkedRepoItem({
           </div>
           <div className="min-w-0">
             <a
-              href={`https://github.com/${repo.full_name}`}
+              href={`https://gitlab.com/${repo.full_name}`}
               target="_blank"
               rel="noopener noreferrer"
               className="text-sm font-medium hover:underline truncate block"
@@ -637,7 +669,7 @@ function LinkedRepoItem({
             <span className="font-semibold text-foreground">
               {repo.full_name}
             </span>{" "}
-            and attempt to delete the webhook from GitHub.
+            and attempt to delete the webhook from GitLab.
           </p>
           {unlinkMutation.isError && (
             <p className="text-xs text-destructive bg-destructive/10 rounded-lg px-3 py-2 mb-4">
@@ -677,7 +709,7 @@ function LinkedRepoItem({
 
 // ── Main Settings ─────────────────────────────────────────────────────────────
 
-function GitHubSettingsInner({
+function GitLabSettingsInner({
   api,
   projectId,
   canEdit,
@@ -687,10 +719,10 @@ function GitHubSettingsInner({
   canEdit: boolean;
 }) {
   const { data: integration, isLoading: integrationLoading } = useQuery<
-    GitHubIntegration | undefined
+    GitLabIntegration | undefined
   >({
     queryKey: integrationKey(projectId),
-    queryFn: () => getGitHubIntegration(api),
+    queryFn: () => getGitLabIntegration(api),
     retry: false,
     throwOnError: false,
   });
@@ -712,7 +744,7 @@ function GitHubSettingsInner({
   const [addRepoOpen, setAddRepoOpen] = useState(false);
 
   const steps = [
-    { num: 1, label: "Connect a GitHub token", done: hasIntegration },
+    { num: 1, label: "Connect a GitLab token", done: hasIntegration },
     { num: 2, label: "Link a repository", done: hasRepos },
   ];
 
@@ -721,13 +753,13 @@ function GitHubSettingsInner({
       {/* Header card */}
       <div className="rounded-xl border border-border/60 bg-card p-6">
         <div className="flex items-center gap-3 mb-1">
-          <GitHubIcon className="size-5 text-foreground/80" />
+          <GitLabIcon className="size-5 text-foreground/80" />
           <h3 className="font-[Syne] text-base font-semibold">
-            GitHub Integration
+            GitLab Integration
           </h3>
         </div>
         <p className="text-sm text-muted-foreground mb-5">
-          Link GitHub repositories to track pull requests, create branches from
+          Link GitLab repositories to track merge requests, create branches from
           tasks, and receive webhook events automatically. You can link multiple
           repositories to a single project.
         </p>
@@ -766,7 +798,7 @@ function GitHubSettingsInner({
           <div className="flex items-center gap-2">
             <KeyRound className="size-3.5 text-muted-foreground/70" />
             <label className="text-sm font-semibold text-foreground/80">
-              Personal Access Token
+              {t("settings.token.label")}
             </label>
           </div>
           {integrationLoading ? (
@@ -778,6 +810,7 @@ function GitHubSettingsInner({
               hasIntegration={hasIntegration}
               onTokenSet={() => setAddRepoOpen(true)}
               canEdit={canEdit}
+              integration={integration}
             />
           )}
         </div>
@@ -824,7 +857,7 @@ function GitHubSettingsInner({
           <p className="text-sm text-muted-foreground mb-4">
             {hasRepos
               ? "Webhooks are registered automatically for each linked repository."
-              : "No repositories linked yet. Link a repository to track pull requests and branches."}
+              : "No repositories linked yet. Link a repository to track merge requests and branches."}
           </p>
 
           {reposLoading ? (
@@ -879,7 +912,7 @@ function GitHubSettingsInner({
         <div className="flex items-start gap-2.5 rounded-lg bg-muted/40 border border-border/40 px-4 py-3">
           <AlertCircle className="size-4 text-muted-foreground/70 shrink-0 mt-0.5" />
           <p className="text-xs text-muted-foreground leading-relaxed">
-            Webhooks are registered on all linked repositories. GitHub will push{" "}
+            Webhooks are registered on all linked repositories. GitLab will push{" "}
             <code className="font-mono">pull_request</code> events to keep PR
             status in sync automatically.
           </p>
@@ -891,7 +924,7 @@ function GitHubSettingsInner({
         <div className="flex items-start gap-2.5 rounded-lg bg-muted/30 border border-dashed border-border/50 px-4 py-3">
           <X className="size-4 text-muted-foreground/50 shrink-0 mt-0.5" />
           <p className="text-xs text-muted-foreground">
-            No GitHub integration configured. Add a personal access token to get
+            No GitLab integration configured. Add a personal access token to get
             started.
           </p>
         </div>
@@ -902,15 +935,18 @@ function GitHubSettingsInner({
 
 // ── Public export ─────────────────────────────────────────────────────────────
 
-interface GitHubSettingsTabProps {
+interface GitLabSettingsTabProps {
   projectId: string;
   canEdit?: boolean;
+  /** Host locale hint (e.g. "it", "en-US"). Falls back to navigator.language. */
+  locale?: string;
 }
 
-export default function GitHubSettingsTab({
+export default function GitLabSettingsTab({
   projectId,
   canEdit = true,
-}: GitHubSettingsTabProps) {
+  locale,
+}: GitLabSettingsTabProps) {
   const api = useMemo(
     () =>
       new PluginApiClient({
@@ -924,7 +960,7 @@ export default function GitHubSettingsTab({
 
   return (
     <PluginQueryClientProvider>
-      <GitHubSettingsInner api={api} projectId={projectId} canEdit={canEdit} />
+      <GitLabSettingsInner api={api} projectId={projectId} canEdit={canEdit} />
     </PluginQueryClientProvider>
   );
 }

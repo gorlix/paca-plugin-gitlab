@@ -1,6 +1,6 @@
-// Package main implements the com.paca.github backend WASM plugin.
+// Package main implements the com.paca.gitlab backend WASM plugin.
 //
-// It manages GitHub integration for projects: PAT storage, repository linking
+// It manages GitLab integration for projects: PAT storage, repository linking
 // with automatic webhook creation, pull-request caching, branch creation, and
 // webhook event processing.
 package main
@@ -17,15 +17,15 @@ func nowStr() string {
 	return time.Now().UTC().Format(time.RFC3339Nano)
 }
 
-// githubPlugin implements plugin.Plugin.
-type githubPlugin struct {
+// gitlabPlugin implements plugin.Plugin.
+type gitlabPlugin struct {
 	db  *plugin.DB
 	log *plugin.Logger
 	cfg *plugin.Config
 }
 
 // Init registers all routes and event handlers on the provided context.
-func (p *githubPlugin) Init(ctx *plugin.Context) error {
+func (p *gitlabPlugin) Init(ctx *plugin.Context) error {
 	p.db = ctx.DB()
 	p.log = ctx.Log()
 	p.cfg = ctx.Config()
@@ -34,7 +34,7 @@ func (p *githubPlugin) Init(ctx *plugin.Context) error {
 	ctx.On("task.deleted", p.handleTaskDeleted)
 	ctx.On("project.deleted", p.handleProjectDeleted)
 
-	// ── Integration (GitHub token / connection) ───────────────────────────────
+	// ── Integration (GitLab token / connection) ───────────────────────────────
 	ctx.Route("GET", "/integration", p.getIntegration)
 	ctx.Route("POST", "/integration/token", p.setToken)
 	ctx.Route("DELETE", "/integration/token", p.deleteToken)
@@ -69,7 +69,7 @@ func (p *githubPlugin) Init(ctx *plugin.Context) error {
 }
 
 // Shutdown is a no-op for this plugin.
-func (p *githubPlugin) Shutdown() {}
+func (p *gitlabPlugin) Shutdown() {}
 
 // ─── envelope helpers ────────────────────────────────────────────────────────
 
@@ -101,12 +101,12 @@ func apiError(res *plugin.Response, code int, errCode, message string) {
 // taskBelongsToProject verifies taskID exists, is not deleted, and belongs
 // to projectID — writing a 404 and returning false otherwise. Every handler
 // that accepts a :taskId path param and uses it to read or write
-// project-scoped GitHub data (PRs, branches) must call this first: the
+// project-scoped GitLab data (PRs, branches) must call this first: the
 // host's route-level permission check only verifies the caller belongs to
 // the project in the URL, it has no way to also verify an arbitrary path
 // param like :taskId belongs to that same project — that's this plugin's
 // job, the same role resolvePRForTask plays for PR-specific resources.
-func (p *githubPlugin) taskBelongsToProject(taskID, projectID string, res *plugin.Response) bool {
+func (p *gitlabPlugin) taskBelongsToProject(taskID, projectID string, res *plugin.Response) bool {
 	result, err := p.db.Query(
 		`SELECT id FROM tasks WHERE id = $1 AND project_id = $2 AND deleted_at IS NULL`,
 		taskID, projectID,
@@ -125,19 +125,19 @@ func (p *githubPlugin) taskBelongsToProject(taskID, projectID string, res *plugi
 // ─── event handlers ──────────────────────────────────────────────────────────
 
 // handleTaskDeleted cleans up branches and PR links when a task is deleted.
-func (p *githubPlugin) handleTaskDeleted(evt *plugin.Event) {
+func (p *gitlabPlugin) handleTaskDeleted(evt *plugin.Event) {
 	var payload struct {
 		TaskID string `json:"task_id"`
 	}
 	if err := json.Unmarshal(evt.Payload, &payload); err != nil || payload.TaskID == "" {
 		return
 	}
-	_, _ = p.db.Exec(`DELETE FROM github_task_branches WHERE task_id = $1`, payload.TaskID)
-	_, _ = p.db.Exec(`DELETE FROM github_task_pr_links WHERE task_id = $1`, payload.TaskID)
+	_, _ = p.db.Exec(`DELETE FROM gitlab_task_branches WHERE task_id = $1`, payload.TaskID)
+	_, _ = p.db.Exec(`DELETE FROM gitlab_task_mr_links WHERE task_id = $1`, payload.TaskID)
 }
 
 // handleProjectDeleted cleans up the full integration when a project is deleted.
-func (p *githubPlugin) handleProjectDeleted(evt *plugin.Event) {
+func (p *gitlabPlugin) handleProjectDeleted(evt *plugin.Event) {
 	var payload struct {
 		ProjectID string `json:"project_id"`
 	}
@@ -145,5 +145,5 @@ func (p *githubPlugin) handleProjectDeleted(evt *plugin.Event) {
 		return
 	}
 	// Cascade via FK, but also be explicit.
-	_, _ = p.db.Exec(`DELETE FROM github_integrations WHERE project_id = $1`, payload.ProjectID)
+	_, _ = p.db.Exec(`DELETE FROM gitlab_integrations WHERE project_id = $1`, payload.ProjectID)
 }

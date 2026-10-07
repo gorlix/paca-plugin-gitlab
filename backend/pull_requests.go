@@ -1,6 +1,7 @@
 package main
 
 import (
+	"strings"
 	"context"
 	"errors"
 	"fmt"
@@ -15,7 +16,7 @@ type pullRequestResponse struct {
 	ProjectID  string  `json:"project_id"`
 	RepoID     string  `json:"repo_id"`
 	PRNumber   int     `json:"pr_number"`
-	GitHubPRID int64   `json:"github_pr_id"`
+	GitLabMRID int64   `json:"gitlab_mr_id"`
 	Title      string  `json:"title"`
 	State      string  `json:"state"`
 	HTMLURL    string  `json:"html_url"`
@@ -29,7 +30,7 @@ type pullRequestResponse struct {
 
 // ─── GET /tasks/:taskId/github/pull-requests ──────────────────────────────────
 
-func (p *githubPlugin) listTaskPRs(req *plugin.Request, res *plugin.Response) {
+func (p *gitlabPlugin) listTaskPRs(req *plugin.Request, res *plugin.Response) {
 	projectID := req.Caller.ProjectID
 	taskID := req.PathParam("taskId")
 	if !p.taskBelongsToProject(taskID, projectID, res) {
@@ -37,7 +38,7 @@ func (p *githubPlugin) listTaskPRs(req *plugin.Request, res *plugin.Response) {
 	}
 
 	linkResult, err := p.db.Query(
-		`SELECT pull_request_id FROM github_task_pr_links WHERE task_id = $1 ORDER BY created_at ASC`,
+		`SELECT merge_request_id FROM gitlab_task_mr_links WHERE task_id = $1 ORDER BY created_at ASC`,
 		taskID,
 	)
 	if err != nil {
@@ -53,9 +54,9 @@ func (p *githubPlugin) listTaskPRs(req *plugin.Request, res *plugin.Response) {
 	// linked across projects.
 	items := make([]pullRequestResponse, 0, len(linkResult.Rows))
 	for _, linkRow := range linkResult.Rows {
-		prID := newRowScanner(linkResult.Columns, linkRow).str("pull_request_id")
+		prID := newRowScanner(linkResult.Columns, linkRow).str("merge_request_id")
 		prResult, pErr := p.db.Query(
-			`SELECT id, project_id, repo_id, pr_number, github_pr_id, title, state, html_url, head_branch, base_branch, author, merged_at, created_at, updated_at FROM github_pull_requests WHERE id = $1 AND project_id = $2`,
+			`SELECT id, project_id, repo_id, pr_number, gitlab_mr_id, title, state, html_url, head_branch, base_branch, author, merged_at, created_at, updated_at FROM gitlab_merge_requests WHERE id = $1 AND project_id = $2`,
 			prID, projectID,
 		)
 		if pErr != nil {
@@ -71,7 +72,7 @@ func (p *githubPlugin) listTaskPRs(req *plugin.Request, res *plugin.Response) {
 			ProjectID:  sc.str("project_id"),
 			RepoID:     sc.str("repo_id"),
 			PRNumber:   sc.intVal("pr_number"),
-			GitHubPRID: sc.int64Val("github_pr_id"),
+			GitLabMRID: sc.int64Val("gitlab_mr_id"),
 			Title:      sc.str("title"),
 			State:      sc.str("state"),
 			HTMLURL:    sc.str("html_url"),
@@ -88,7 +89,7 @@ func (p *githubPlugin) listTaskPRs(req *plugin.Request, res *plugin.Response) {
 
 // ─── POST /tasks/:taskId/github/pull-requests/link ───────────────────────────
 
-func (p *githubPlugin) linkPRToTask(req *plugin.Request, res *plugin.Response) {
+func (p *gitlabPlugin) linkPRToTask(req *plugin.Request, res *plugin.Response) {
 	projectID := req.Caller.ProjectID
 	taskID := req.PathParam("taskId")
 	if !p.taskBelongsToProject(taskID, projectID, res) {
@@ -105,7 +106,7 @@ func (p *githubPlugin) linkPRToTask(req *plugin.Request, res *plugin.Response) {
 		return
 	}
 
-	token, err := p.decryptToken(projectID)
+	ghc, err := p.clientForProject(projectID)
 	if err != nil {
 		writeAppError(res, err)
 		return
@@ -113,7 +114,7 @@ func (p *githubPlugin) linkPRToTask(req *plugin.Request, res *plugin.Response) {
 
 	// Get repository details.
 	repoResult, rErr := p.db.Query(
-		`SELECT owner, repo_name FROM github_repositories WHERE id = $1 AND project_id = $2`,
+		`SELECT owner, repo_name FROM gitlab_repositories WHERE id = $1 AND project_id = $2`,
 		b.RepoID, projectID,
 	)
 	if rErr != nil {
@@ -121,24 +122,23 @@ func (p *githubPlugin) linkPRToTask(req *plugin.Request, res *plugin.Response) {
 		return
 	}
 	if len(repoResult.Rows) == 0 {
-		apiError(res, 404, "GITHUB_REPOSITORY_NOT_FOUND", "Repository not found")
+		apiError(res, 404, "GITLAB_REPOSITORY_NOT_FOUND", "Repository not found")
 		return
 	}
 	rSc := newRowScanner(repoResult.Columns, repoResult.Rows[0])
 	owner := rSc.str("owner")
 	repoName := rSc.str("repo_name")
 
-	ghc := newGHClient(token)
 	ghPR, err := ghc.getPullRequest(context.Background(), owner, repoName, b.PRNumber)
 	if err != nil {
-		var apiErr *ghAPIError
+		var apiErr *glAPIError
 		if errors.As(err, &apiErr) {
 			switch apiErr.StatusCode {
 			case 404:
-				apiError(res, 404, "GITHUB_PR_NOT_FOUND", fmt.Sprintf("PR #%d not found in %s/%s", b.PRNumber, owner, repoName))
+				apiError(res, 404, "GITLAB_PR_NOT_FOUND", fmt.Sprintf("PR #%d not found in %s/%s", b.PRNumber, owner, repoName))
 				return
 			case 401, 403:
-				apiError(res, 403, "GITHUB_TOKEN_INSUFFICIENT_PERMISSIONS", "Token does not have permission to read pull requests")
+				apiError(res, 403, "GITLAB_TOKEN_INSUFFICIENT_PERMISSIONS", "Token does not have permission to read pull requests")
 				return
 			}
 		}
@@ -146,10 +146,7 @@ func (p *githubPlugin) linkPRToTask(req *plugin.Request, res *plugin.Response) {
 		return
 	}
 
-	state := ghPR.State
-	if ghPR.Merged {
-		state = "merged"
-	}
+	state := ghPR.NormalizedState()
 
 	now := nowStr()
 
@@ -161,15 +158,15 @@ func (p *githubPlugin) linkPRToTask(req *plugin.Request, res *plugin.Response) {
 
 	// Upsert the PR cache; let PostgreSQL generate id on insert, RETURNING gives us id+created_at.
 	upserted, err := p.db.Query(`
-		INSERT INTO github_pull_requests
-			(project_id, repo_id, pr_number, github_pr_id, title, state, html_url, head_branch, base_branch, author, merged_at, created_at, updated_at)
+		INSERT INTO gitlab_merge_requests
+			(project_id, repo_id, pr_number, gitlab_mr_id, title, state, html_url, head_branch, base_branch, author, merged_at, created_at, updated_at)
 		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
 		ON CONFLICT (repo_id, pr_number) DO UPDATE SET
 			title=$5, state=$6, html_url=$7, head_branch=$8, base_branch=$9,
 			author=$10, merged_at=$11, updated_at=$13
 		RETURNING id, created_at
 	`, projectID, b.RepoID, b.PRNumber, ghPR.ID, ghPR.Title, state,
-		ghPR.HTMLURL, ghPR.Head.Ref, ghPR.Base.Ref, ghPR.User.Login, mergedAtStr, now, now)
+		ghPR.WebURL, ghPR.SourceBranch, ghPR.TargetBranch, ghPR.Author.Username, mergedAtStr, now, now)
 	if err != nil || len(upserted.Rows) == 0 {
 		if err != nil {
 			apiError(res, 500, "INTERNAL_ERROR", err.Error())
@@ -184,20 +181,20 @@ func (p *githubPlugin) linkPRToTask(req *plugin.Request, res *plugin.Response) {
 
 	// Link the PR to the task.
 	rowsAffected, lErr := p.db.Exec(`
-		INSERT INTO github_task_pr_links (task_id, pull_request_id, created_at)
+		INSERT INTO gitlab_task_mr_links (task_id, merge_request_id, created_at)
 		VALUES ($1,$2,$3)
-		ON CONFLICT (task_id, pull_request_id) DO NOTHING
+		ON CONFLICT (task_id, merge_request_id) DO NOTHING
 	`, taskID, prID, now)
 	if lErr != nil {
 		apiError(res, 500, "INTERNAL_ERROR", lErr.Error())
 		return
 	}
 	if rowsAffected == 0 {
-		apiError(res, 409, "GITHUB_PR_ALREADY_LINKED", "Pull request is already linked to this task")
+		apiError(res, 409, "GITLAB_PR_ALREADY_LINKED", "Pull request is already linked to this task")
 		return
 	}
 
-	plugin.EmitEvent("github.pr_linked", map[string]any{
+	plugin.EmitEvent("gitlab.mr_linked", map[string]any{
 		"project_id": projectID,
 		"task_id":    taskID,
 		"repo_id":    b.RepoID,
@@ -210,13 +207,13 @@ func (p *githubPlugin) linkPRToTask(req *plugin.Request, res *plugin.Response) {
 		ProjectID:  projectID,
 		RepoID:     b.RepoID,
 		PRNumber:   b.PRNumber,
-		GitHubPRID: ghPR.ID,
+		GitLabMRID: ghPR.ID,
 		Title:      ghPR.Title,
 		State:      state,
-		HTMLURL:    ghPR.HTMLURL,
-		HeadBranch: ghPR.Head.Ref,
-		BaseBranch: ghPR.Base.Ref,
-		Author:     ghPR.User.Login,
+		HTMLURL:    ghPR.WebURL,
+		HeadBranch: ghPR.SourceBranch,
+		BaseBranch: ghPR.TargetBranch,
+		Author:     ghPR.Author.Username,
 		MergedAt:   mergedAtStr,
 		CreatedAt:  prCreatedAt,
 		UpdatedAt:  now,
@@ -225,7 +222,7 @@ func (p *githubPlugin) linkPRToTask(req *plugin.Request, res *plugin.Response) {
 
 // ─── POST /tasks/:taskId/github/pull-requests ─────────────────────────────────
 
-func (p *githubPlugin) createPullRequest(req *plugin.Request, res *plugin.Response) {
+func (p *gitlabPlugin) createPullRequest(req *plugin.Request, res *plugin.Response) {
 	projectID := req.Caller.ProjectID
 	taskID := req.PathParam("taskId")
 	if !p.taskBelongsToProject(taskID, projectID, res) {
@@ -245,14 +242,14 @@ func (p *githubPlugin) createPullRequest(req *plugin.Request, res *plugin.Respon
 		return
 	}
 
-	token, err := p.decryptToken(projectID)
+	ghc, err := p.clientForProject(projectID)
 	if err != nil {
 		writeAppError(res, err)
 		return
 	}
 
 	repoResult, rErr := p.db.Query(
-		`SELECT owner, repo_name FROM github_repositories WHERE id = $1 AND project_id = $2`,
+		`SELECT owner, repo_name FROM gitlab_repositories WHERE id = $1 AND project_id = $2`,
 		b.RepoID, projectID,
 	)
 	if rErr != nil {
@@ -260,24 +257,23 @@ func (p *githubPlugin) createPullRequest(req *plugin.Request, res *plugin.Respon
 		return
 	}
 	if len(repoResult.Rows) == 0 {
-		apiError(res, 404, "GITHUB_REPOSITORY_NOT_FOUND", "Repository not found")
+		apiError(res, 404, "GITLAB_REPOSITORY_NOT_FOUND", "Repository not found")
 		return
 	}
 	rSc := newRowScanner(repoResult.Columns, repoResult.Rows[0])
 	owner := rSc.str("owner")
 	repoName := rSc.str("repo_name")
 
-	ghc := newGHClient(token)
 	ghPR, err := ghc.createPullRequest(context.Background(), owner, repoName, b.Title, b.HeadBranch, b.BaseBranch, b.Body)
 	if err != nil {
-		var apiErr *ghAPIError
+		var apiErr *glAPIError
 		if errors.As(err, &apiErr) {
 			switch apiErr.StatusCode {
 			case 401, 403:
-				apiError(res, 403, "GITHUB_TOKEN_INSUFFICIENT_PERMISSIONS", "Token does not have permission to create pull requests")
+				apiError(res, 403, "GITLAB_TOKEN_INSUFFICIENT_PERMISSIONS", "Token does not have permission to create pull requests")
 				return
 			case 422:
-				apiError(res, 422, "GITHUB_PR_VALIDATION_ERROR", fmt.Sprintf("GitHub validation error: %s", apiErr.Message))
+				apiError(res, 422, "GITLAB_PR_VALIDATION_ERROR", fmt.Sprintf("GitLab validation error: %s", apiErr.Message))
 				return
 			}
 		}
@@ -285,10 +281,7 @@ func (p *githubPlugin) createPullRequest(req *plugin.Request, res *plugin.Respon
 		return
 	}
 
-	state := ghPR.State
-	if ghPR.Merged {
-		state = "merged"
-	}
+	state := ghPR.NormalizedState()
 
 	now := nowStr()
 
@@ -299,15 +292,15 @@ func (p *githubPlugin) createPullRequest(req *plugin.Request, res *plugin.Respon
 	}
 
 	upserted, err := p.db.Query(`
-		INSERT INTO github_pull_requests
-			(project_id, repo_id, pr_number, github_pr_id, title, state, html_url, head_branch, base_branch, author, merged_at, created_at, updated_at)
+		INSERT INTO gitlab_merge_requests
+			(project_id, repo_id, pr_number, gitlab_mr_id, title, state, html_url, head_branch, base_branch, author, merged_at, created_at, updated_at)
 		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$12)
 		ON CONFLICT (repo_id, pr_number) DO UPDATE SET
 			title=$5, state=$6, html_url=$7, head_branch=$8, base_branch=$9,
 			author=$10, merged_at=$11, updated_at=$12
 		RETURNING id
-	`, projectID, b.RepoID, ghPR.Number, ghPR.ID, ghPR.Title, state,
-		ghPR.HTMLURL, ghPR.Head.Ref, ghPR.Base.Ref, ghPR.User.Login, mergedAtStr, now)
+	`, projectID, b.RepoID, ghPR.IID, ghPR.ID, ghPR.Title, state,
+		ghPR.WebURL, ghPR.SourceBranch, ghPR.TargetBranch, ghPR.Author.Username, mergedAtStr, now)
 	if err != nil || len(upserted.Rows) == 0 {
 		if err != nil {
 			apiError(res, 500, "INTERNAL_ERROR", err.Error())
@@ -319,9 +312,9 @@ func (p *githubPlugin) createPullRequest(req *plugin.Request, res *plugin.Respon
 	prID := newRowScanner(upserted.Columns, upserted.Rows[0]).str("id")
 
 	_, lErr := p.db.Exec(`
-		INSERT INTO github_task_pr_links (task_id, pull_request_id, created_at)
+		INSERT INTO gitlab_task_mr_links (task_id, merge_request_id, created_at)
 		VALUES ($1,$2,$3)
-		ON CONFLICT (task_id, pull_request_id) DO NOTHING
+		ON CONFLICT (task_id, merge_request_id) DO NOTHING
 	`, taskID, prID, now)
 	if lErr != nil {
 		p.log.Error("failed to link PR to task: " + lErr.Error())
@@ -331,22 +324,22 @@ func (p *githubPlugin) createPullRequest(req *plugin.Request, res *plugin.Respon
 		"project_id": projectID,
 		"task_id":    taskID,
 		"repo_id":    b.RepoID,
-		"pr_number":  ghPR.Number,
-		"pr_url":     ghPR.HTMLURL,
+		"pr_number":  ghPR.IID,
+		"pr_url":     ghPR.WebURL,
 	})
 
 	created(res, pullRequestResponse{
 		ID:         prID,
 		ProjectID:  projectID,
 		RepoID:     b.RepoID,
-		PRNumber:   ghPR.Number,
-		GitHubPRID: ghPR.ID,
+		PRNumber:   ghPR.IID,
+		GitLabMRID: ghPR.ID,
 		Title:      ghPR.Title,
 		State:      state,
-		HTMLURL:    ghPR.HTMLURL,
-		HeadBranch: ghPR.Head.Ref,
-		BaseBranch: ghPR.Base.Ref,
-		Author:     ghPR.User.Login,
+		HTMLURL:    ghPR.WebURL,
+		HeadBranch: ghPR.SourceBranch,
+		BaseBranch: ghPR.TargetBranch,
+		Author:     ghPR.Author.Username,
 		MergedAt:   mergedAtStr,
 		CreatedAt:  now,
 		UpdatedAt:  now,
@@ -355,7 +348,7 @@ func (p *githubPlugin) createPullRequest(req *plugin.Request, res *plugin.Respon
 
 // ─── DELETE /tasks/:taskId/github/pull-requests/:prId ────────────────────────
 
-func (p *githubPlugin) unlinkPRFromTask(req *plugin.Request, res *plugin.Response) {
+func (p *gitlabPlugin) unlinkPRFromTask(req *plugin.Request, res *plugin.Response) {
 	projectID := req.Caller.ProjectID
 	taskID := req.PathParam("taskId")
 	prID := req.PathParam("prId")
@@ -367,7 +360,7 @@ func (p *githubPlugin) unlinkPRFromTask(req *plugin.Request, res *plugin.Respons
 	// task) before deleting the link — defense-in-depth against any link a
 	// pre-fix caller might have already created across projects.
 	prResult, err := p.db.Query(
-		`SELECT id FROM github_pull_requests WHERE id = $1 AND project_id = $2`,
+		`SELECT id FROM gitlab_merge_requests WHERE id = $1 AND project_id = $2`,
 		prID, projectID,
 	)
 	if err != nil {
@@ -375,12 +368,12 @@ func (p *githubPlugin) unlinkPRFromTask(req *plugin.Request, res *plugin.Respons
 		return
 	}
 	if len(prResult.Rows) == 0 {
-		apiError(res, 404, "GITHUB_PR_LINK_NOT_FOUND", "Pull request link not found")
+		apiError(res, 404, "GITLAB_PR_LINK_NOT_FOUND", "Pull request link not found")
 		return
 	}
 
 	rowsAffected, err := p.db.Exec(
-		`DELETE FROM github_task_pr_links WHERE task_id = $1 AND pull_request_id = $2`,
+		`DELETE FROM gitlab_task_mr_links WHERE task_id = $1 AND merge_request_id = $2`,
 		taskID, prID,
 	)
 	if err != nil {
@@ -388,53 +381,53 @@ func (p *githubPlugin) unlinkPRFromTask(req *plugin.Request, res *plugin.Respons
 		return
 	}
 	if rowsAffected == 0 {
-		apiError(res, 404, "GITHUB_PR_LINK_NOT_FOUND", "Pull request link not found")
+		apiError(res, 404, "GITLAB_PR_LINK_NOT_FOUND", "Pull request link not found")
 		return
 	}
 	noContent(res)
 }
 
-// ─── Shared: resolve a PR's GitHub coordinates for a task ────────────────────
+// ─── Shared: resolve a PR's GitLab coordinates for a task ────────────────────
 
-// resolvePRForTask looks up the owner/repo/PR-number GitHub needs to act on a
+// resolvePRForTask looks up the owner/repo/PR-number GitLab needs to act on a
 // PR, verifying in the same query that prID is actually linked to taskID
 // within this project. Used by every handler below so a caller can't act on
 // a PR outside the task (or project) it claims to be operating in.
-func (p *githubPlugin) resolvePRForTask(projectID, taskID, prID string) (owner, repoName string, prNumber int, err error) {
+func (p *gitlabPlugin) resolvePRForTask(projectID, taskID, prID string) (owner, repoName string, prNumber int, err error) {
 	linkResult, lErr := p.db.Query(
-		`SELECT pull_request_id FROM github_task_pr_links WHERE task_id = $1 AND pull_request_id = $2`,
+		`SELECT merge_request_id FROM gitlab_task_mr_links WHERE task_id = $1 AND merge_request_id = $2`,
 		taskID, prID,
 	)
 	if lErr != nil {
 		return "", "", 0, lErr
 	}
 	if len(linkResult.Rows) == 0 {
-		return "", "", 0, &appError{code: "GITHUB_PR_LINK_NOT_FOUND", status: 404, msg: "Pull request link not found"}
+		return "", "", 0, &appError{code: "GITLAB_PR_LINK_NOT_FOUND", status: 404, msg: "Pull request link not found"}
 	}
 
 	prResult, pErr := p.db.Query(
-		`SELECT repo_id, pr_number FROM github_pull_requests WHERE id = $1 AND project_id = $2`,
+		`SELECT repo_id, pr_number FROM gitlab_merge_requests WHERE id = $1 AND project_id = $2`,
 		prID, projectID,
 	)
 	if pErr != nil {
 		return "", "", 0, pErr
 	}
 	if len(prResult.Rows) == 0 {
-		return "", "", 0, &appError{code: "GITHUB_PR_NOT_FOUND", status: 404, msg: "Pull request not found"}
+		return "", "", 0, &appError{code: "GITLAB_PR_NOT_FOUND", status: 404, msg: "Pull request not found"}
 	}
 	prSc := newRowScanner(prResult.Columns, prResult.Rows[0])
 	repoID := prSc.str("repo_id")
 	prNumber = prSc.intVal("pr_number")
 
 	repoResult, rErr := p.db.Query(
-		`SELECT owner, repo_name FROM github_repositories WHERE id = $1 AND project_id = $2`,
+		`SELECT owner, repo_name FROM gitlab_repositories WHERE id = $1 AND project_id = $2`,
 		repoID, projectID,
 	)
 	if rErr != nil {
 		return "", "", 0, rErr
 	}
 	if len(repoResult.Rows) == 0 {
-		return "", "", 0, &appError{code: "GITHUB_REPOSITORY_NOT_FOUND", status: 404, msg: "Repository not found"}
+		return "", "", 0, &appError{code: "GITLAB_REPOSITORY_NOT_FOUND", status: 404, msg: "Repository not found"}
 	}
 	repoSc := newRowScanner(repoResult.Columns, repoResult.Rows[0])
 	return repoSc.str("owner"), repoSc.str("repo_name"), prNumber, nil
@@ -453,7 +446,7 @@ type pullRequestDetailsResponse struct {
 	Diff     string `json:"diff"`
 }
 
-func (p *githubPlugin) getPullRequestDetails(req *plugin.Request, res *plugin.Response) {
+func (p *gitlabPlugin) getPullRequestDetails(req *plugin.Request, res *plugin.Response) {
 	projectID := req.Caller.ProjectID
 	taskID := req.PathParam("taskId")
 	prID := req.PathParam("prId")
@@ -463,13 +456,11 @@ func (p *githubPlugin) getPullRequestDetails(req *plugin.Request, res *plugin.Re
 		writeAppError(res, err)
 		return
 	}
-	token, err := p.decryptToken(projectID)
+	ghc, err := p.clientForProject(projectID)
 	if err != nil {
 		writeAppError(res, err)
 		return
 	}
-
-	ghc := newGHClient(token)
 	ctx := context.Background()
 	ghPR, err := ghc.getPullRequest(ctx, owner, repoName, prNumber)
 	if err != nil {
@@ -487,8 +478,8 @@ func (p *githubPlugin) getPullRequestDetails(req *plugin.Request, res *plugin.Re
 		RepoName: repoName,
 		PRNumber: prNumber,
 		Title:    ghPR.Title,
-		State:    ghPR.State,
-		HTMLURL:  ghPR.HTMLURL,
+		State:    ghPR.NormalizedState(),
+		HTMLURL:  ghPR.WebURL,
 		Diff:     diff,
 	})
 }
@@ -507,7 +498,7 @@ type ciStatusResponse struct {
 	Checks []ciCheckResponse `json:"checks"`
 }
 
-// overallCIState summarizes a set of checks the same way GitHub's own PR
+// overallCIState summarizes a set of checks the same way GitLab's own PR
 // merge-box does: any failure wins, otherwise any still-running check makes
 // the whole thing pending, otherwise (and only if there's at least one
 // check) it's a success. No checks at all is reported as "unknown" rather
@@ -535,7 +526,7 @@ func overallCIState(checks []ciCheckResponse) string {
 	return "success"
 }
 
-func (p *githubPlugin) getPullRequestCIStatus(req *plugin.Request, res *plugin.Response) {
+func (p *gitlabPlugin) getPullRequestCIStatus(req *plugin.Request, res *plugin.Response) {
 	projectID := req.Caller.ProjectID
 	taskID := req.PathParam("taskId")
 	prID := req.PathParam("prId")
@@ -545,51 +536,36 @@ func (p *githubPlugin) getPullRequestCIStatus(req *plugin.Request, res *plugin.R
 		writeAppError(res, err)
 		return
 	}
-	token, err := p.decryptToken(projectID)
+	ghc, err := p.clientForProject(projectID)
 	if err != nil {
 		writeAppError(res, err)
 		return
 	}
-
-	ghc := newGHClient(token)
 	ctx := context.Background()
-	ghPR, err := ghc.getPullRequest(ctx, owner, repoName, prNumber)
-	if err != nil {
-		apiError(res, 502, "INTERNAL_ERROR", fmt.Sprintf("failed to fetch pull request: %s", err))
+	if _, err := ghc.getPullRequest(ctx, owner, repoName, prNumber); err != nil {
+		apiError(res, 502, "INTERNAL_ERROR", fmt.Sprintf("failed to fetch merge request: %s", err))
 		return
 	}
-	sha := ghPR.Head.SHA
-
-	checks := make([]ciCheckResponse, 0)
-
-	if combined, cErr := ghc.getCombinedStatus(ctx, owner, repoName, sha); cErr == nil {
-		for _, s := range combined.Statuses {
-			checks = append(checks, ciCheckResponse{
-				Name:       s.Context,
-				Status:     "completed",
-				Conclusion: s.State,
-				URL:        s.TargetURL,
-			})
-		}
-	} else {
-		p.log.Error(fmt.Sprintf("failed to fetch combined status for %s/%s@%s: %s", owner, repoName, sha, cErr))
+	pipelines, pErr := ghc.listMergeRequestPipelines(ctx, owner, repoName, prNumber)
+	if pErr != nil {
+		p.log.Error(fmt.Sprintf("failed to fetch MR pipelines for %s/%s!%d: %s", owner, repoName, prNumber, pErr))
+		ok(res, ciStatusResponse{State: "unknown", Checks: []ciCheckResponse{}})
+		return
 	}
 
-	if runs, rErr := ghc.getCheckRuns(ctx, owner, repoName, sha); rErr == nil {
-		for _, r := range runs.CheckRuns {
-			conclusion := ""
-			if r.Conclusion != nil {
-				conclusion = *r.Conclusion
-			}
-			checks = append(checks, ciCheckResponse{
-				Name:       r.Name,
-				Status:     r.Status,
-				Conclusion: conclusion,
-				URL:        r.HTMLURL,
-			})
+	checks := make([]ciCheckResponse, 0, len(pipelines))
+	for _, pipe := range pipelines {
+		status, conclusion := mapPipelineStatus(pipe.Status)
+		name := pipe.Name
+		if name == "" {
+			name = "pipeline #" + fmt.Sprintf("%d", pipe.ID)
 		}
-	} else {
-		p.log.Error(fmt.Sprintf("failed to fetch check runs for %s/%s@%s: %s", owner, repoName, sha, rErr))
+		checks = append(checks, ciCheckResponse{
+			Name:       name,
+			Status:     status,
+			Conclusion: conclusion,
+			URL:        pipe.WebURL,
+		})
 	}
 
 	ok(res, ciStatusResponse{
@@ -598,9 +574,28 @@ func (p *githubPlugin) getPullRequestCIStatus(req *plugin.Request, res *plugin.R
 	})
 }
 
+func mapPipelineStatus(status string) (runStatus, conclusion string) {
+	switch strings.ToLower(status) {
+	case "success":
+		return "completed", "success"
+	case "failed":
+		return "completed", "failure"
+	case "canceled", "cancelled":
+		return "completed", "cancelled"
+	case "skipped":
+		return "completed", "skipped"
+	case "manual", "scheduled":
+		return "completed", "action_required"
+	case "running", "pending", "created", "waiting_for_resource", "preparing":
+		return "in_progress", ""
+	default:
+		return status, ""
+	}
+}
+
 // ─── POST /tasks/:taskId/github/pull-requests/:prId/comments ─────────────────
 
-func (p *githubPlugin) addPullRequestComment(req *plugin.Request, res *plugin.Response) {
+func (p *gitlabPlugin) addPullRequestComment(req *plugin.Request, res *plugin.Response) {
 	projectID := req.Caller.ProjectID
 	taskID := req.PathParam("taskId")
 	prID := req.PathParam("prId")
@@ -619,17 +614,15 @@ func (p *githubPlugin) addPullRequestComment(req *plugin.Request, res *plugin.Re
 		writeAppError(res, err)
 		return
 	}
-	token, err := p.decryptToken(projectID)
+	ghc, err := p.clientForProject(projectID)
 	if err != nil {
 		writeAppError(res, err)
 		return
 	}
-
-	ghc := newGHClient(token)
 	if err := ghc.createIssueComment(context.Background(), owner, repoName, prNumber, b.Body); err != nil {
-		var apiErr *ghAPIError
+		var apiErr *glAPIError
 		if errors.As(err, &apiErr) && (apiErr.StatusCode == 401 || apiErr.StatusCode == 403) {
-			apiError(res, 403, "GITHUB_TOKEN_INSUFFICIENT_PERMISSIONS", "Token does not have permission to comment on pull requests")
+			apiError(res, 403, "GITLAB_TOKEN_INSUFFICIENT_PERMISSIONS", "Token does not have permission to comment on pull requests")
 			return
 		}
 		apiError(res, 502, "INTERNAL_ERROR", fmt.Sprintf("failed to add comment: %s", err))
@@ -640,7 +633,7 @@ func (p *githubPlugin) addPullRequestComment(req *plugin.Request, res *plugin.Re
 
 // ─── POST /tasks/:taskId/github/pull-requests/:prId/reviews ──────────────────
 
-func (p *githubPlugin) createReview(req *plugin.Request, res *plugin.Response) {
+func (p *gitlabPlugin) createReview(req *plugin.Request, res *plugin.Response) {
 	projectID := req.Caller.ProjectID
 	taskID := req.PathParam("taskId")
 	prID := req.PathParam("prId")
@@ -666,22 +659,20 @@ func (p *githubPlugin) createReview(req *plugin.Request, res *plugin.Response) {
 		writeAppError(res, err)
 		return
 	}
-	token, err := p.decryptToken(projectID)
+	ghc, err := p.clientForProject(projectID)
 	if err != nil {
 		writeAppError(res, err)
 		return
 	}
-
-	ghc := newGHClient(token)
 	if err := ghc.createPullRequestReview(context.Background(), owner, repoName, prNumber, b.Event, b.Body); err != nil {
-		var apiErr *ghAPIError
+		var apiErr *glAPIError
 		if errors.As(err, &apiErr) {
 			switch apiErr.StatusCode {
 			case 401, 403:
-				apiError(res, 403, "GITHUB_TOKEN_INSUFFICIENT_PERMISSIONS", "Token does not have permission to review pull requests")
+				apiError(res, 403, "GITLAB_TOKEN_INSUFFICIENT_PERMISSIONS", "Token does not have permission to review pull requests")
 				return
 			case 422:
-				apiError(res, 422, "GITHUB_PR_VALIDATION_ERROR", fmt.Sprintf("GitHub validation error: %s", apiErr.Message))
+				apiError(res, 422, "GITLAB_PR_VALIDATION_ERROR", fmt.Sprintf("GitLab validation error: %s", apiErr.Message))
 				return
 			}
 		}

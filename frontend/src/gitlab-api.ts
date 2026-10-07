@@ -1,22 +1,22 @@
 import { type PluginApiClient } from "@paca-ai/plugin-sdk-react";
 
-const PLUGIN_ID = "com.paca.github";
+const PLUGIN_ID = "com.paca.gitlab";
 
 // ── Error codes ────────────────────────────────────────────────────────────────
 
 export const ErrorCode = {
-  GitHubIntegrationNotFound: "GITHUB_INTEGRATION_NOT_FOUND",
-  GitHubRepositoryNotFound: "GITHUB_REPOSITORY_NOT_FOUND",
-  GitHubPRNotFound: "GITHUB_PR_NOT_FOUND",
-  GitHubPRAlreadyLinked: "GITHUB_PR_ALREADY_LINKED",
-  GitHubInvalidToken: "GITHUB_INVALID_TOKEN",
-  GitHubRepoNotAccessible: "GITHUB_REPO_NOT_ACCESSIBLE",
-  GitHubRepoAlreadyLinked: "GITHUB_REPO_ALREADY_LINKED",
-  GitHubWebhookCreationFailed: "GITHUB_WEBHOOK_CREATION_FAILED",
-  GitHubWebhookURLNotPublic: "GITHUB_WEBHOOK_URL_NOT_PUBLIC",
-  GitHubBranchAlreadyLinked: "GITHUB_BRANCH_ALREADY_LINKED",
-  GitHubBranchNotFound: "GITHUB_BRANCH_NOT_FOUND",
-  GitHubTokenInsufficientPermissions: "GITHUB_TOKEN_INSUFFICIENT_PERMISSIONS",
+  GitLabIntegrationNotFound: "GITLAB_INTEGRATION_NOT_FOUND",
+  GitLabRepositoryNotFound: "GITLAB_REPOSITORY_NOT_FOUND",
+  GitLabPRNotFound: "GITLAB_PR_NOT_FOUND",
+  GitLabPRAlreadyLinked: "GITLAB_PR_ALREADY_LINKED",
+  GitLabInvalidToken: "GITLAB_INVALID_TOKEN",
+  GitLabRepoNotAccessible: "GITLAB_REPO_NOT_ACCESSIBLE",
+  GitLabRepoAlreadyLinked: "GITLAB_REPO_ALREADY_LINKED",
+  GitLabWebhookCreationFailed: "GITLAB_WEBHOOK_CREATION_FAILED",
+  GitLabWebhookURLNotPublic: "GITLAB_WEBHOOK_URL_NOT_PUBLIC",
+  GitLabBranchAlreadyLinked: "GITLAB_BRANCH_ALREADY_LINKED",
+  GitLabBranchNotFound: "GITLAB_BRANCH_NOT_FOUND",
+  GitLabTokenInsufficientPermissions: "GITLAB_TOKEN_INSUFFICIENT_PERMISSIONS",
   BadRequest: "BAD_REQUEST",
 } as const;
 
@@ -48,13 +48,17 @@ export function getPluginErrorCode(err: unknown): ErrorCodeValue | null {
 
 // ── Domain types ───────────────────────────────────────────────────────────────
 
-export interface GitHubIntegration {
+export interface GitLabIntegration {
   id?: string;
   project_id: string;
   connected: boolean;
+  instance_url?: string;
+  token_kind?: "personal" | "project" | "group";
   created_at?: string;
   updated_at?: string;
 }
+
+export type GitLabTokenKind = "personal" | "project" | "group";
 
 export interface AccessibleRepo {
   full_name: string;
@@ -126,22 +130,25 @@ export const taskBranchesKey = (projectId: string, taskId: string) =>
 
 // ── API functions ──────────────────────────────────────────────────────────────
 
-export async function getGitHubIntegration(
+export async function getGitLabIntegration(
   api: PluginApiClient,
-): Promise<GitHubIntegration> {
-  return api.pluginGet<GitHubIntegration>(PLUGIN_ID, `/projects/${api.projectId}/integration`);
+): Promise<GitLabIntegration> {
+  return api.pluginGet<GitLabIntegration>(PLUGIN_ID, `/projects/${api.projectId}/integration`);
 }
 
-export async function setGitHubToken(
+export async function setGitLabToken(
   api: PluginApiClient,
   token: string,
-): Promise<GitHubIntegration> {
-  return api.pluginPost<GitHubIntegration>(PLUGIN_ID, `/projects/${api.projectId}/integration/token`, {
+  opts?: { instanceUrl?: string; tokenKind?: GitLabTokenKind },
+): Promise<GitLabIntegration> {
+  return api.pluginPost<GitLabIntegration>(PLUGIN_ID, `/projects/${api.projectId}/integration/token`, {
     token,
+    instance_url: opts?.instanceUrl || "https://gitlab.com",
+    token_kind: opts?.tokenKind || "personal",
   });
 }
 
-export async function deleteGitHubToken(api: PluginApiClient): Promise<void> {
+export async function deleteGitLabToken(api: PluginApiClient): Promise<void> {
   return api.pluginDelete(PLUGIN_ID, `/projects/${api.projectId}/integration/token`);
 }
 

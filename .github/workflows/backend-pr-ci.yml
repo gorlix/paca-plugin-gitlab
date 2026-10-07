@@ -73,7 +73,7 @@ jobs:
           sudo dpkg -i /tmp/tinygo.deb
 
       - name: Build WASM
-        run: tinygo build -target=wasip1 -buildmode=c-shared -o github.wasm .
+        run: tinygo build -target=wasip1 -buildmode=c-shared -o gitlab.wasm .
 
   test:
     name: Tests

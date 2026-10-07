@@ -34,7 +34,7 @@ import {
   taskBranchesKey,
   taskPRsKey,
   unlinkPRFromTask,
-} from "./github-api";
+} from "./gitlab-api";
 
 // ── Utilities ──────────────────────────────────────────────────────────────────
 
@@ -42,7 +42,7 @@ function cn(...classes: (string | undefined | null | false)[]): string {
   return classes.filter(Boolean).join(" ");
 }
 
-// ─────────────────────── Pull Requests Section ────────────────────────────────
+// ─────────────────────── Merge Requests Section ────────────────────────────────
 
 // ── PR state badge ────────────────────────────────────────────────────────────
 
@@ -133,7 +133,7 @@ function PRRow({
       {canEdit && (
         <button
           type="button"
-          aria-label="Unlink pull request"
+          aria-label="Unlink merge request"
           className="shrink-0 mt-0.5 opacity-0 group-hover:opacity-100 transition-opacity text-muted-foreground/60 hover:text-destructive"
           onClick={() => unlinkMutation.mutate()}
           disabled={unlinkMutation.isPending}
@@ -151,17 +151,19 @@ function PRRow({
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-function parseGitHubPRUrl(
+function parseGitLabPRUrl(
   raw: string,
 ): { fullName: string; prNumber: number } | null {
   try {
     const url = new URL(raw.trim());
-    if (url.hostname !== "github.com") return null;
-    const parts = url.pathname.replace(/^\//, "").split("/");
-    if (parts.length < 4 || parts[2] !== "pull") return null;
-    const prNumber = Number(parts[3]);
+    const parts = url.pathname.replace(/^\//, "").split("/").filter(Boolean);
+    const dash = parts.indexOf("-");
+    if (dash < 1 || parts[dash + 1] !== "merge_requests") return null;
+    const prNumber = Number(parts[dash + 2]);
     if (!Number.isInteger(prNumber) || prNumber <= 0) return null;
-    return { fullName: `${parts[0]}/${parts[1]}`, prNumber };
+    const fullName = parts.slice(0, dash).join("/");
+    if (!fullName) return null;
+    return { fullName, prNumber };
   } catch {
     return null;
   }
@@ -189,7 +191,7 @@ function LinkPRForm({
   const [value, setValue] = useState("");
   const [error, setError] = useState<string | null>(null);
 
-  const parsed = parseGitHubPRUrl(value);
+  const parsed = parseGitLabPRUrl(value);
   const urlMatchedRepo = parsed
     ? (repos.find((r) => r.full_name === parsed.fullName) ?? null)
     : null;
@@ -210,33 +212,33 @@ function LinkPRForm({
     },
     onError: (err: unknown) => {
       const code = getPluginErrorCode(err);
-      if (code === ErrorCode.GitHubIntegrationNotFound) {
-        setError("No GitHub token configured for this project.");
+      if (code === ErrorCode.GitLabIntegrationNotFound) {
+        setError("No GitLab token configured for this project.");
         return;
       }
-      if (code === ErrorCode.GitHubRepositoryNotFound) {
+      if (code === ErrorCode.GitLabRepositoryNotFound) {
         setError("Repository not found. It may have been unlinked.");
         return;
       }
-      if (code === ErrorCode.GitHubPRNotFound) {
+      if (code === ErrorCode.GitLabPRNotFound) {
         const displayNum = parsed ? parsed.prNumber : value;
         setError(
           `PR #${displayNum} was not found in the selected repository.`,
         );
         return;
       }
-      if (code === ErrorCode.GitHubPRAlreadyLinked) {
+      if (code === ErrorCode.GitLabPRAlreadyLinked) {
         const displayNum = parsed ? parsed.prNumber : value;
         setError(`PR #${displayNum} is already linked to this task.`);
         return;
       }
-      if (code === ErrorCode.GitHubTokenInsufficientPermissions) {
+      if (code === ErrorCode.GitLabTokenInsufficientPermissions) {
         setError(
-          "Your GitHub token does not have permission to read pull requests. Update it in Project Settings > GitHub.",
+          "Your GitLab token does not have permission to read merge requests. Update it in Project Settings > GitLab.",
         );
         return;
       }
-      setError("Failed to link pull request. Please try again.");
+      setError("Failed to link merge request. Please try again.");
     },
   });
 
@@ -255,7 +257,7 @@ function LinkPRForm({
       }
       const num = Number(value);
       if (!value.trim() || !Number.isInteger(num) || num <= 0) {
-        setError("Enter a valid PR number or paste a GitHub PR URL.");
+        setError("Enter a valid PR number or paste a GitLab PR URL.");
         return;
       }
     }
@@ -288,7 +290,7 @@ function LinkPRForm({
       {/* PR number or URL */}
       <div>
         <p className="text-xs text-muted-foreground mb-1">
-          PR number or GitHub URL
+          PR number or GitLab URL
         </p>
         <input
           type="text"
@@ -301,7 +303,7 @@ function LinkPRForm({
             if (e.key === "Enter") submit();
             if (e.key === "Escape") onDone();
           }}
-          placeholder="42 or https://github.com/owner/repo/pull/42"
+          placeholder="42 or https://gitlab.com/owner/repo/-/merge_requests/42"
           className={cn(
             "w-full rounded-md border bg-background px-2.5 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-ring",
             error ? "border-destructive" : "border-border/60",
@@ -337,7 +339,7 @@ function LinkPRForm({
           ) : (
             <GitPullRequest className="size-3.5" />
           )}
-          Link pull request
+          Link merge request
         </button>
         <button
           type="button"
@@ -351,7 +353,7 @@ function LinkPRForm({
   );
 }
 
-// ── Pull Requests section ─────────────────────────────────────────────────────
+// ── Merge Requests section ─────────────────────────────────────────────────────
 
 function PullRequestsSection({
   api,
@@ -390,7 +392,7 @@ function PullRequestsSection({
         onClick={() => setExpanded((v) => !v)}
       >
         <GitPullRequest className="size-3.5 shrink-0" />
-        <span>Pull Requests</span>
+        <span>Merge Requests</span>
         {count > 0 && (
           <span className="rounded-full bg-muted px-1.5 py-0.5 text-xs font-bold text-muted-foreground normal-case tracking-normal">
             {count}
@@ -426,7 +428,7 @@ function PullRequestsSection({
 
               {count === 0 && !linking && (
                 <p className="text-xs text-muted-foreground/50 italic py-1">
-                  No pull requests linked yet.
+                  No merge requests linked yet.
                 </p>
               )}
 
@@ -446,7 +448,7 @@ function PullRequestsSection({
                     onClick={() => setLinking(true)}
                   >
                     <Plus className="size-3.5" />
-                    Link pull request
+                    Link merge request
                   </button>
                 )
               )}
@@ -598,21 +600,21 @@ function CreateBranchForm({
     },
     onError: (err: unknown) => {
       const code = getPluginErrorCode(err);
-      if (code === ErrorCode.GitHubIntegrationNotFound) {
-        setError("No GitHub token configured for this project.");
+      if (code === ErrorCode.GitLabIntegrationNotFound) {
+        setError("No GitLab token configured for this project.");
         return;
       }
-      if (code === ErrorCode.GitHubRepositoryNotFound) {
+      if (code === ErrorCode.GitLabRepositoryNotFound) {
         setError("Repository not found. It may have been unlinked.");
         return;
       }
-      if (code === ErrorCode.GitHubBranchAlreadyLinked) {
+      if (code === ErrorCode.GitLabBranchAlreadyLinked) {
         setError("This branch is already linked to the task.");
         return;
       }
-      if (code === ErrorCode.GitHubTokenInsufficientPermissions) {
+      if (code === ErrorCode.GitLabTokenInsufficientPermissions) {
         setError(
-          "Your GitHub token does not have permission to create branches. Please update it in Project Settings > GitHub with a token that has the repo (contents) scope.",
+          "Your GitLab token does not have permission to create branches. Please update it in Project Settings > GitLab with a token that has the repo (contents) scope.",
         );
         return;
       }
@@ -734,7 +736,7 @@ function CreateBranchForm({
           ) : (
             <GitBranch className="size-3.5" />
           )}
-          Create branch on GitHub
+          Create branch on GitLab
         </button>
 
         <div>
@@ -758,17 +760,18 @@ function CreateBranchForm({
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-function parseGitHubBranchUrl(
+function parseGitLabBranchUrl(
   raw: string,
 ): { fullName: string; branchName: string } | null {
   try {
     const url = new URL(raw.trim());
-    if (url.hostname !== "github.com") return null;
-    const parts = url.pathname.replace(/^\//, "").split("/");
-    if (parts.length < 4 || parts[2] !== "tree") return null;
-    const branchName = parts.slice(3).join("/");
-    if (!branchName) return null;
-    return { fullName: `${parts[0]}/${parts[1]}`, branchName };
+    const parts = url.pathname.replace(/^\//, "").split("/").filter(Boolean);
+    const dash = parts.indexOf("-");
+    if (dash < 1 || parts[dash + 1] !== "tree") return null;
+    const branchName = parts.slice(dash + 2).join("/");
+    const fullName = parts.slice(0, dash).join("/");
+    if (!fullName || !branchName) return null;
+    return { fullName, branchName };
   } catch {
     return null;
   }
@@ -796,7 +799,7 @@ function LinkBranchForm({
   const [value, setValue] = useState("");
   const [error, setError] = useState<string | null>(null);
 
-  const parsed = parseGitHubBranchUrl(value);
+  const parsed = parseGitLabBranchUrl(value);
   const urlMatchedRepo = parsed
     ? (repos.find((r) => r.full_name === parsed.fullName) ?? null)
     : null;
@@ -815,27 +818,27 @@ function LinkBranchForm({
     },
     onError: (err: unknown) => {
       const code = getPluginErrorCode(err);
-      if (code === ErrorCode.GitHubIntegrationNotFound) {
-        setError("No GitHub token configured for this project.");
+      if (code === ErrorCode.GitLabIntegrationNotFound) {
+        setError("No GitLab token configured for this project.");
         return;
       }
-      if (code === ErrorCode.GitHubRepositoryNotFound) {
+      if (code === ErrorCode.GitLabRepositoryNotFound) {
         setError("Repository not found. It may have been unlinked.");
         return;
       }
-      if (code === ErrorCode.GitHubBranchNotFound) {
+      if (code === ErrorCode.GitLabBranchNotFound) {
         setError(
           `Branch "${branchName}" was not found in the selected repository.`,
         );
         return;
       }
-      if (code === ErrorCode.GitHubBranchAlreadyLinked) {
+      if (code === ErrorCode.GitLabBranchAlreadyLinked) {
         setError(`Branch "${branchName}" is already linked to this task.`);
         return;
       }
-      if (code === ErrorCode.GitHubTokenInsufficientPermissions) {
+      if (code === ErrorCode.GitLabTokenInsufficientPermissions) {
         setError(
-          "Your GitHub token does not have permission to read branches. Update it in Project Settings > GitHub.",
+          "Your GitLab token does not have permission to read branches. Update it in Project Settings > GitLab.",
         );
         return;
       }
@@ -857,7 +860,7 @@ function LinkBranchForm({
         return;
       }
       if (!branchName) {
-        setError("Enter a branch name or paste a GitHub branch URL.");
+        setError("Enter a branch name or paste a GitLab branch URL.");
         return;
       }
     }
@@ -890,7 +893,7 @@ function LinkBranchForm({
       {/* Branch name or URL */}
       <div>
         <p className="text-xs text-muted-foreground mb-1">
-          Branch name or GitHub URL
+          Branch name or GitLab URL
         </p>
         <input
           type="text"
@@ -903,7 +906,7 @@ function LinkBranchForm({
             if (e.key === "Enter") submit();
             if (e.key === "Escape") onDone();
           }}
-          placeholder="feature/foo or https://github.com/owner/repo/tree/feature/foo"
+          placeholder="feature/foo or https://gitlab.com/owner/repo/tree/feature/foo"
           className={cn(
             "w-full rounded-md border bg-background px-2.5 py-1.5 text-xs font-mono focus:outline-none focus:ring-1 focus:ring-ring",
             error ? "border-destructive" : "border-border/60",
@@ -1090,13 +1093,13 @@ function BranchesSection({
 
 // ─────────────────────── Main Task Section ────────────────────────────────────
 
-interface GitHubTaskSectionProps {
+interface GitLabTaskSectionProps {
   projectId: string;
   taskId: string;
   canEdit?: boolean;
 }
 
-function GitHubTaskSectionInner({
+function GitLabTaskSectionInner({
   api,
   projectId,
   taskId,
@@ -1156,11 +1159,11 @@ function GitHubTaskSectionInner({
   );
 }
 
-export default function GitHubTaskSection({
+export default function GitLabTaskSection({
   projectId,
   taskId,
   canEdit = true,
-}: GitHubTaskSectionProps) {
+}: GitLabTaskSectionProps) {
   const api = useMemo(
     () =>
       new PluginApiClient({
@@ -1174,7 +1177,7 @@ export default function GitHubTaskSection({
 
   return (
     <PluginQueryClientProvider>
-      <GitHubTaskSectionInner
+      <GitLabTaskSectionInner
         api={api}
         projectId={projectId}
         taskId={taskId}

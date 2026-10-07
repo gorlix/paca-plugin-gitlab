@@ -5,7 +5,7 @@ package main
 import plugin "github.com/Paca-AI/plugin-sdk-go"
 
 func init() {
-	plugin.Run(&githubPlugin{})
+	plugin.Run(&gitlabPlugin{})
 }
 
 func main() {}

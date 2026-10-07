@@ -9,7 +9,7 @@ import {
 
 // ── Domain types ──────────────────────────────────────────────────────────────
 
-interface GitHubIntegration {
+interface GitLabIntegration {
 	id: string;
 	project_id: string;
 	created_at: string;
@@ -86,7 +86,7 @@ interface CreatePullRequestResult {
 	project_id: string;
 	repo_id: string;
 	pr_number: number;
-	github_pr_id: number;
+	gitlab_pr_id: number;
 	title: string;
 	state: string;
 	html_url: string;
@@ -100,8 +100,8 @@ interface CreatePullRequestResult {
 
 // ── Formatting helpers ────────────────────────────────────────────────────────
 
-function formatIntegration(integration: GitHubIntegration): string {
-	return `GitHub Integration:
+function formatIntegration(integration: GitLabIntegration): string {
+	return `GitLab Integration:
 ID: ${integration.id}
 Project ID: ${integration.project_id}
 Created: ${integration.created_at}
@@ -120,7 +120,7 @@ Created: ${repo.created_at}`;
 }
 
 function formatPullRequest(pr: PullRequest): string {
-	return `Pull Request: #${pr.pr_number} - ${pr.title}
+	return `Merge Request: #${pr.pr_number} - ${pr.title}
 ID: ${pr.id}
 State: ${pr.state}
 Author: ${pr.author ?? "Unknown"}
@@ -131,7 +131,7 @@ Merged: ${pr.merged_at ? `Yes (${pr.merged_at})` : "No"}`;
 }
 
 function formatPullRequestDetails(pr: PullRequestDetails): string {
-	return `Pull Request: #${pr.pr_number} - ${pr.title} (${pr.owner}/${pr.repo_name})
+	return `Merge Request: #${pr.pr_number} - ${pr.title} (${pr.owner}/${pr.repo_name})
 State: ${pr.state}
 URL: ${pr.html_url}
 Description: ${pr.body || "(none)"}
@@ -184,8 +184,8 @@ const taskIdProp = {
 const tools: Tool[] = [
 	// ── Integration ──────────────────────────────────────────────────────────
 	{
-		name: "github_get_integration",
-		description: "Get GitHub integration status for a project.",
+		name: "gitlab_get_integration",
+		description: "Get GitLab integration status for a project.",
 		inputSchema: {
 			type: "object",
 			properties: {
@@ -195,24 +195,24 @@ const tools: Tool[] = [
 		},
 	},
 	{
-		name: "github_set_token",
+		name: "gitlab_set_token",
 		description:
-			"Set (or replace) the GitHub personal access token for a project. The token must have at least the 'repo' scope.",
+			"Set (or replace) the GitLab personal access token for a project. The token must have at least the 'repo' scope.",
 		inputSchema: {
 			type: "object",
 			properties: {
 				projectId: projectIdProp,
 				token: {
 					type: "string",
-					description: "The GitHub personal access token (e.g., 'ghp_xxxx').",
+					description: "The GitLab personal access token (e.g., 'ghp_xxxx').",
 				},
 			},
 			required: ["projectId", "token"],
 		},
 	},
 	{
-		name: "github_delete_token",
-		description: "Delete the GitHub token for a project, removing GitHub integration.",
+		name: "gitlab_delete_token",
+		description: "Delete the GitLab token for a project, removing GitLab integration.",
 		inputSchema: {
 			type: "object",
 			properties: {
@@ -223,8 +223,8 @@ const tools: Tool[] = [
 	},
 	// ── Repositories ─────────────────────────────────────────────────────────
 	{
-		name: "github_list_linked_repos",
-		description: "List GitHub repositories linked to a project.",
+		name: "gitlab_list_linked_repos",
+		description: "List GitLab repositories linked to a project.",
 		inputSchema: {
 			type: "object",
 			properties: {
@@ -234,16 +234,16 @@ const tools: Tool[] = [
 		},
 	},
 	{
-		name: "github_link_repository",
+		name: "gitlab_link_repository",
 		description:
-			"Link a GitHub repository to a project. The repository must be accessible with the project's GitHub token.",
+			"Link a GitLab repository to a project. The repository must be accessible with the project's GitLab token.",
 		inputSchema: {
 			type: "object",
 			properties: {
 				projectId: projectIdProp,
 				owner: {
 					type: "string",
-					description: "The repository owner (GitHub username or org).",
+					description: "The repository owner (GitLab username or org).",
 				},
 				repo_name: {
 					type: "string",
@@ -254,8 +254,8 @@ const tools: Tool[] = [
 		},
 	},
 	{
-		name: "github_unlink_repository",
-		description: "Unlink a GitHub repository from a project.",
+		name: "gitlab_unlink_repository",
+		description: "Unlink a GitLab repository from a project.",
 		inputSchema: {
 			type: "object",
 			properties: {
@@ -264,16 +264,16 @@ const tools: Tool[] = [
 					type: "string",
 					description:
 						UUID_DESC.replace("%s", "linked repository") +
-						" Use github_list_linked_repos to get the repo ID.",
+						" Use gitlab_list_linked_repos to get the repo ID.",
 				},
 			},
 			required: ["projectId", "repoId"],
 		},
 	},
-	// ── Pull Requests ─────────────────────────────────────────────────────────
+	// ── Merge Requests ─────────────────────────────────────────────────────────
 	{
-		name: "github_list_task_prs",
-		description: "List pull requests linked to a task.",
+		name: "gitlab_list_task_prs",
+		description: "List merge requests linked to a task.",
 		inputSchema: {
 			type: "object",
 			properties: {
@@ -284,8 +284,8 @@ const tools: Tool[] = [
 		},
 	},
 	{
-		name: "github_link_pr_to_task",
-		description: "Link a GitHub pull request to a task.",
+		name: "gitlab_link_pr_to_task",
+		description: "Link a GitLab merge request to a task.",
 		inputSchema: {
 			type: "object",
 			properties: {
@@ -295,19 +295,19 @@ const tools: Tool[] = [
 					type: "string",
 					description:
 						UUID_DESC.replace("%s", "linked repository") +
-						" Use github_list_linked_repos to get the repo ID.",
+						" Use gitlab_list_linked_repos to get the repo ID.",
 				},
 				pr_number: {
 					type: "number",
-					description: "The GitHub pull request number (e.g., 42).",
+					description: "The GitLab merge request number (e.g., 42).",
 				},
 			},
 			required: ["projectId", "taskId", "repoId", "pr_number"],
 		},
 	},
 	{
-		name: "github_unlink_pr_from_task",
-		description: "Unlink a pull request from a task.",
+		name: "gitlab_unlink_pr_from_task",
+		description: "Unlink a merge request from a task.",
 		inputSchema: {
 			type: "object",
 			properties: {
@@ -316,17 +316,17 @@ const tools: Tool[] = [
 				prId: {
 					type: "string",
 					description:
-						UUID_DESC.replace("%s", "linked pull request") +
-						" Use github_list_task_prs to get the PR ID.",
+						UUID_DESC.replace("%s", "linked merge request") +
+						" Use gitlab_list_task_prs to get the PR ID.",
 				},
 			},
 			required: ["projectId", "taskId", "prId"],
 		},
 	},
 	{
-		name: "github_create_pull_request",
+		name: "gitlab_create_pull_request",
 		description:
-			"Create a new pull request on GitHub for a task. The pull request will be created on the linked repository and automatically linked to the task. Returns the PR URL.",
+			"Create a new merge request on GitLab for a task. The merge request will be created on the linked repository and automatically linked to the task. Returns the PR URL.",
 		inputSchema: {
 			type: "object",
 			properties: {
@@ -336,12 +336,12 @@ const tools: Tool[] = [
 					type: "string",
 					description:
 						UUID_DESC.replace("%s", "linked repository") +
-						" Use github_list_linked_repos to get the repo ID.",
+						" Use gitlab_list_linked_repos to get the repo ID.",
 				},
 				title: {
 					type: "string",
 					description:
-						"The title for the pull request (e.g., 'feat: add user authentication').",
+						"The title for the merge request (e.g., 'feat: add user authentication').",
 				},
 				head_branch: {
 					type: "string",
@@ -356,16 +356,16 @@ const tools: Tool[] = [
 				body: {
 					type: "string",
 					description:
-						"The description/body for the pull request in Markdown format (optional).",
+						"The description/body for the merge request in Markdown format (optional).",
 				},
 			},
 			required: ["projectId", "taskId", "repoId", "title", "head_branch", "base_branch"],
 		},
 	},
 	{
-		name: "github_get_pull_request",
+		name: "gitlab_get_pull_request",
 		description:
-			"Fetch a pull request's title, description, state, and diff so it can be reviewed.",
+			"Fetch a merge request's title, description, state, and diff so it can be reviewed.",
 		inputSchema: {
 			type: "object",
 			properties: {
@@ -374,17 +374,17 @@ const tools: Tool[] = [
 				prId: {
 					type: "string",
 					description:
-						UUID_DESC.replace("%s", "linked pull request") +
-						" Use github_list_task_prs to get the PR ID.",
+						UUID_DESC.replace("%s", "linked merge request") +
+						" Use gitlab_list_task_prs to get the PR ID.",
 				},
 			},
 			required: ["projectId", "taskId", "prId"],
 		},
 	},
 	{
-		name: "github_get_pull_request_ci_status",
+		name: "gitlab_get_pull_request_ci_status",
 		description:
-			"Get the CI/check status for a pull request's latest commit (e.g. GitHub Actions runs, other check runs, and legacy commit statuses). Returns an overall state (success, failure, pending, or unknown) plus the individual checks.",
+			"Get the CI/check status for a merge request's latest commit (e.g. GitLab Actions runs, other check runs, and legacy commit statuses). Returns an overall state (success, failure, pending, or unknown) plus the individual checks.",
 		inputSchema: {
 			type: "object",
 			properties: {
@@ -393,16 +393,16 @@ const tools: Tool[] = [
 				prId: {
 					type: "string",
 					description:
-						UUID_DESC.replace("%s", "linked pull request") +
-						" Use github_list_task_prs to get the PR ID.",
+						UUID_DESC.replace("%s", "linked merge request") +
+						" Use gitlab_list_task_prs to get the PR ID.",
 				},
 			},
 			required: ["projectId", "taskId", "prId"],
 		},
 	},
 	{
-		name: "github_comment_pull_request",
-		description: "Add a general (non-review) comment to a pull request.",
+		name: "gitlab_comment_pull_request",
+		description: "Add a general (non-review) comment to a merge request.",
 		inputSchema: {
 			type: "object",
 			properties: {
@@ -411,8 +411,8 @@ const tools: Tool[] = [
 				prId: {
 					type: "string",
 					description:
-						UUID_DESC.replace("%s", "linked pull request") +
-						" Use github_list_task_prs to get the PR ID.",
+						UUID_DESC.replace("%s", "linked merge request") +
+						" Use gitlab_list_task_prs to get the PR ID.",
 				},
 				body: {
 					type: "string",
@@ -423,9 +423,9 @@ const tools: Tool[] = [
 		},
 	},
 	{
-		name: "github_review_pull_request",
+		name: "gitlab_review_pull_request",
 		description:
-			"Submit a formal review on a pull request (approve, request changes, or comment). Call github_get_pull_request first to see the diff.",
+			"Submit a formal review on a merge request (approve, request changes, or comment). Call gitlab_get_pull_request first to see the diff.",
 		inputSchema: {
 			type: "object",
 			properties: {
@@ -434,8 +434,8 @@ const tools: Tool[] = [
 				prId: {
 					type: "string",
 					description:
-						UUID_DESC.replace("%s", "linked pull request") +
-						" Use github_list_task_prs to get the PR ID.",
+						UUID_DESC.replace("%s", "linked merge request") +
+						" Use gitlab_list_task_prs to get the PR ID.",
 				},
 				event: {
 					type: "string",
@@ -453,9 +453,9 @@ const tools: Tool[] = [
 	},
 	// ── Branches ─────────────────────────────────────────────────────────────
 	{
-		name: "github_create_branch",
+		name: "gitlab_create_branch",
 		description:
-			"Create a new branch on GitHub for a task and link it to the task.",
+			"Create a new branch on GitLab for a task and link it to the task.",
 		inputSchema: {
 			type: "object",
 			properties: {
@@ -465,7 +465,7 @@ const tools: Tool[] = [
 					type: "string",
 					description:
 						UUID_DESC.replace("%s", "linked repository") +
-						" Use github_list_linked_repos to get the repo ID.",
+						" Use gitlab_list_linked_repos to get the repo ID.",
 				},
 				branch_name: {
 					type: "string",
@@ -482,9 +482,9 @@ const tools: Tool[] = [
 		},
 	},
 	{
-		name: "github_link_branch_to_task",
+		name: "gitlab_link_branch_to_task",
 		description:
-			"Link an existing GitHub branch to a task (does not create the branch on GitHub).",
+			"Link an existing GitLab branch to a task (does not create the branch on GitLab).",
 		inputSchema: {
 			type: "object",
 			properties: {
@@ -494,7 +494,7 @@ const tools: Tool[] = [
 					type: "string",
 					description:
 						UUID_DESC.replace("%s", "linked repository") +
-						" Use github_list_linked_repos to get the repo ID.",
+						" Use gitlab_list_linked_repos to get the repo ID.",
 				},
 				branch_name: {
 					type: "string",
@@ -506,7 +506,7 @@ const tools: Tool[] = [
 		},
 	},
 	{
-		name: "github_list_task_branches",
+		name: "gitlab_list_task_branches",
 		description: "List branches linked to a task.",
 		inputSchema: {
 			type: "object",
@@ -534,46 +534,46 @@ const entry: PluginMCPEntry = {
 		try {
 			switch (name) {
 				// ── Integration ────────────────────────────────────────────────
-				case "github_get_integration": {
+				case "gitlab_get_integration": {
 					const { projectId } = args as { projectId: string };
-					const integration = await api.pluginGet<GitHubIntegration>(
+					const integration = await api.pluginGet<GitLabIntegration>(
 						`projects/${projectId}/integration`,
 					);
 					return textResult(formatIntegration(integration));
 				}
 
-				case "github_set_token": {
+				case "gitlab_set_token": {
 					const { projectId, token } = args as {
 						projectId: string;
 						token: string;
 					};
-					const integration = await api.pluginPost<GitHubIntegration>(
+					const integration = await api.pluginPost<GitLabIntegration>(
 						`projects/${projectId}/integration/token`,
 						{ token },
 					);
 					return textResult(
-						`GitHub token set successfully:\n\n${formatIntegration(integration)}`,
+						`GitLab token set successfully:\n\n${formatIntegration(integration)}`,
 					);
 				}
 
-				case "github_delete_token": {
+				case "gitlab_delete_token": {
 					const { projectId } = args as { projectId: string };
 					await api.pluginDelete(`projects/${projectId}/integration/token`);
-					return textResult("GitHub token deleted successfully.");
+					return textResult("GitLab token deleted successfully.");
 				}
 
 				// ── Repositories ───────────────────────────────────────────────
-				case "github_list_linked_repos": {
+				case "gitlab_list_linked_repos": {
 					const { projectId } = args as { projectId: string };
 					const repos = await api.pluginGet<LinkedRepository[]>(
 						`projects/${projectId}/repositories`,
 					);
 					return textResult(
-						`Linked GitHub Repositories:\n\n${formatList(repos, formatLinkedRepo)}`,
+						`Linked GitLab Repositories:\n\n${formatList(repos, formatLinkedRepo)}`,
 					);
 				}
 
-				case "github_link_repository": {
+				case "gitlab_link_repository": {
 					const { projectId, owner, repo_name } = args as {
 						projectId: string;
 						owner: string;
@@ -588,7 +588,7 @@ const entry: PluginMCPEntry = {
 					);
 				}
 
-				case "github_unlink_repository": {
+				case "gitlab_unlink_repository": {
 					const { projectId, repoId } = args as {
 						projectId: string;
 						repoId: string;
@@ -599,8 +599,8 @@ const entry: PluginMCPEntry = {
 					return textResult(`Repository ${repoId} unlinked successfully.`);
 				}
 
-				// ── Pull Requests ──────────────────────────────────────────────
-				case "github_list_task_prs": {
+				// ── Merge Requests ──────────────────────────────────────────────
+				case "gitlab_list_task_prs": {
 					const { projectId, taskId } = args as {
 						projectId: string;
 						taskId: string;
@@ -609,11 +609,11 @@ const entry: PluginMCPEntry = {
 						`projects/${projectId}/tasks/${taskId}/pull-requests`,
 					);
 					return textResult(
-						`Pull Requests:\n\n${formatList(prs, formatPullRequest)}`,
+						`Merge Requests:\n\n${formatList(prs, formatPullRequest)}`,
 					);
 				}
 
-				case "github_link_pr_to_task": {
+				case "gitlab_link_pr_to_task": {
 					const { projectId, taskId, repoId, pr_number } = args as {
 						projectId: string;
 						taskId: string;
@@ -625,11 +625,11 @@ const entry: PluginMCPEntry = {
 						{ repo_id: repoId, pr_number },
 					);
 					return textResult(
-						`Pull request linked successfully:\n\n${formatPullRequest(pr)}`,
+						`Merge request linked successfully:\n\n${formatPullRequest(pr)}`,
 					);
 				}
 
-				case "github_unlink_pr_from_task": {
+				case "gitlab_unlink_pr_from_task": {
 					const { projectId, taskId, prId } = args as {
 						projectId: string;
 						taskId: string;
@@ -638,10 +638,10 @@ const entry: PluginMCPEntry = {
 					await api.pluginDelete(
 						`projects/${projectId}/tasks/${taskId}/pull-requests/${prId}`,
 					);
-					return textResult(`Pull request ${prId} unlinked successfully.`);
+					return textResult(`Merge request ${prId} unlinked successfully.`);
 				}
 
-				case "github_create_pull_request": {
+				case "gitlab_create_pull_request": {
 					const { projectId, taskId, repoId, title, head_branch, base_branch, body } =
 						args as {
 							projectId: string;
@@ -657,11 +657,11 @@ const entry: PluginMCPEntry = {
 						{ repo_id: repoId, title, head_branch, base_branch, body: body ?? "" },
 					);
 					return textResult(
-						`Pull request created successfully:\n\n#${pr.pr_number} ${pr.title}\nState: ${pr.state}\nAuthor: ${pr.author}\nHead: ${pr.head_branch} → Base: ${pr.base_branch}\nURL: ${pr.html_url}`,
+						`Merge request created successfully:\n\n#${pr.pr_number} ${pr.title}\nState: ${pr.state}\nAuthor: ${pr.author}\nHead: ${pr.head_branch} → Base: ${pr.base_branch}\nURL: ${pr.html_url}`,
 					);
 				}
 
-				case "github_get_pull_request": {
+				case "gitlab_get_pull_request": {
 					const { projectId, taskId, prId } = args as {
 						projectId: string;
 						taskId: string;
@@ -673,7 +673,7 @@ const entry: PluginMCPEntry = {
 					return textResult(formatPullRequestDetails(pr));
 				}
 
-				case "github_get_pull_request_ci_status": {
+				case "gitlab_get_pull_request_ci_status": {
 					const { projectId, taskId, prId } = args as {
 						projectId: string;
 						taskId: string;
@@ -685,7 +685,7 @@ const entry: PluginMCPEntry = {
 					return textResult(formatCIStatus(ci));
 				}
 
-				case "github_comment_pull_request": {
+				case "gitlab_comment_pull_request": {
 					const { projectId, taskId, prId, body } = args as {
 						projectId: string;
 						taskId: string;
@@ -699,7 +699,7 @@ const entry: PluginMCPEntry = {
 					return textResult("Comment posted successfully.");
 				}
 
-				case "github_review_pull_request": {
+				case "gitlab_review_pull_request": {
 					const { projectId, taskId, prId, event, body } = args as {
 						projectId: string;
 						taskId: string;
@@ -715,7 +715,7 @@ const entry: PluginMCPEntry = {
 				}
 
 				// ── Branches ───────────────────────────────────────────────────
-				case "github_create_branch": {
+				case "gitlab_create_branch": {
 					const { projectId, taskId, repoId, branch_name, source_branch } =
 						args as {
 							projectId: string;
@@ -733,7 +733,7 @@ const entry: PluginMCPEntry = {
 					);
 				}
 
-				case "github_link_branch_to_task": {
+				case "gitlab_link_branch_to_task": {
 					const { projectId, taskId, repoId, branch_name } = args as {
 						projectId: string;
 						taskId: string;
@@ -749,7 +749,7 @@ const entry: PluginMCPEntry = {
 					);
 				}
 
-				case "github_list_task_branches": {
+				case "gitlab_list_task_branches": {
 					const { projectId, taskId } = args as {
 						projectId: string;
 						taskId: string;
@@ -767,7 +767,7 @@ const entry: PluginMCPEntry = {
 			}
 		} catch (err: unknown) {
 			const msg = err instanceof Error ? err.message : String(err);
-			return errorResult(`GitHub plugin error: ${msg}`);
+			return errorResult(`GitLab plugin error: ${msg}`);
 		}
 	},
 
@@ -791,7 +791,7 @@ const entry: PluginMCPEntry = {
 			]);
 			if (branches.length === 0 && prs.length === 0) return null;
 
-			const lines = ["## GitHub"];
+			const lines = ["## GitLab"];
 			if (branches.length > 0) {
 				lines.push(
 					"",
@@ -802,7 +802,7 @@ const entry: PluginMCPEntry = {
 			if (prs.length > 0) {
 				lines.push(
 					"",
-					"**Pull Requests:**",
+					"**Merge Requests:**",
 					...prs.map(
 						(pr) => `- #${pr.pr_number} [${pr.state}] ${pr.title} — ${pr.html_url}`,
 					),

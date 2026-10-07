@@ -3,7 +3,7 @@ package main
 import (
 	"crypto/hmac"
 	"crypto/sha256"
-	"encoding/hex"
+	"encoding/base64"
 	"encoding/json"
 	"regexp"
 	"strconv"
@@ -18,15 +18,12 @@ var branchTaskRefRe = regexp.MustCompile(`(?i)\b([A-Z][A-Z0-9]{1,19})-(\d{1,6})\
 
 // ─── POST /webhook ────────────────────────────────────────────────────────────
 
-func (p *githubPlugin) receiveWebhook(req *plugin.Request, res *plugin.Response) {
-	// projectId comes from the URL the integration registered with GitHub
-	// (.../projects/:projectId/webhook) — this route has no requirePermissions
-	// middleware (GitHub itself calls it, with no Paca auth), so
-	// req.Caller.ProjectID is never populated here; the path segment is the
-	// only source of truth for which project this delivery is for.
+func (p *gitlabPlugin) receiveWebhook(req *plugin.Request, res *plugin.Response) {
 	projectID := req.PathParam("projectId")
-	event := req.Headers["X-Github-Event"]
-	signature := req.Headers["X-Hub-Signature-256"]
+	event := headerGet(req.Headers, "X-Gitlab-Event")
+	webhookID := headerGet(req.Headers, "webhook-id")
+	timestamp := headerGet(req.Headers, "webhook-timestamp")
+	signature := headerGet(req.Headers, "webhook-signature")
 
 	body := req.Body
 	if len(body) == 0 {
@@ -34,40 +31,47 @@ func (p *githubPlugin) receiveWebhook(req *plugin.Request, res *plugin.Response)
 		return
 	}
 
-	repoFullName := extractRepoFullName(body)
+	repoFullName := extractGitLabProjectPath(body)
 	if repoFullName == "" {
 		res.NoContent()
 		return
 	}
 
-	// Always 204 so GitHub does not retry on application errors.
-	if err := p.handleWebhookEvent(projectID, repoFullName, event, signature, body); err != nil {
-		p.log.Error("github: webhook handler error: " + err.Error())
+	if err := p.handleWebhookEvent(projectID, repoFullName, event, webhookID, timestamp, signature, body); err != nil {
+		p.log.Error("gitlab: webhook handler error: " + err.Error())
 	}
 	res.NoContent()
 }
 
-func (p *githubPlugin) handleWebhookEvent(projectID, repoFullName, event, signature string, payload []byte) error {
-	p.log.Info("github: webhook received, repo=" + repoFullName + ", event=" + event)
+func headerGet(headers map[string]string, key string) string {
+	if headers == nil {
+		return ""
+	}
+	if v, ok := headers[key]; ok {
+		return v
+	}
+	// Host may normalize header keys.
+	for k, v := range headers {
+		if strings.EqualFold(k, key) {
+			return v
+		}
+	}
+	return ""
+}
 
-	// Look up the repository by (project_id, full_name) — full_name alone is
-	// only unique per-project (two projects can legitimately link the same
-	// repo), so scoping by the URL's own project_id avoids picking an
-	// arbitrary row when that happens; the previous full_name-only lookup
-	// could resolve to a different project's row, using its secret to
-	// verify a delivery meant for this project (which then just fails
-	// closed on the signature check) or its repo/default_branch for event
-	// processing.
+func (p *gitlabPlugin) handleWebhookEvent(projectID, repoFullName, event, webhookID, timestamp, signature string, payload []byte) error {
+	p.log.Info("gitlab: webhook received, repo=" + repoFullName + ", event=" + event)
+
 	result, err := p.db.Query(
-		`SELECT id, project_id, integration_id, owner, repo_name, full_name, default_branch, webhook_secret_enc FROM github_repositories WHERE full_name = $1 AND project_id = $2`,
+		`SELECT id, project_id, integration_id, owner, repo_name, full_name, default_branch, webhook_secret_enc FROM gitlab_repositories WHERE full_name = $1 AND project_id = $2`,
 		repoFullName, projectID,
 	)
 	if err != nil {
-		p.log.Error("github: failed to query repository: " + err.Error() + ", repo=" + repoFullName)
+		p.log.Error("gitlab: failed to query repository: " + err.Error() + ", repo=" + repoFullName)
 		return err
 	}
 	if len(result.Rows) == 0 {
-		p.log.Info("github: repository not found, repo=" + repoFullName)
+		p.log.Info("gitlab: repository not found, repo=" + repoFullName)
 		return nil
 	}
 	sc := newRowScanner(result.Columns, result.Rows[0])
@@ -75,88 +79,84 @@ func (p *githubPlugin) handleWebhookEvent(projectID, repoFullName, event, signat
 	projectID = sc.str("project_id")
 	webhookSecretEnc := sc.str("webhook_secret_enc")
 
-	// Verify HMAC signature. A missing secret fails closed rather than
-	// skipping verification — an unsigned/unverifiable delivery must never
-	// be trusted, even though every repo linked through the normal API
-	// always has a secret generated for it today.
 	if webhookSecretEnc == "" {
-		p.log.Error("github: repository has no webhook secret configured, refusing to process delivery, repo=" + repoFullName)
+		p.log.Error("gitlab: repository has no webhook signing token configured, refusing delivery, repo=" + repoFullName)
 		return nil
 	}
-	secret, dErr := p.decrypt(webhookSecretEnc)
+	signingToken, dErr := p.decrypt(webhookSecretEnc)
 	if dErr != nil {
-		p.log.Error("github: failed to decrypt webhook secret: " + dErr.Error() + ", repo=" + repoFullName)
+		p.log.Error("gitlab: failed to decrypt webhook signing token: " + dErr.Error() + ", repo=" + repoFullName)
 		return dErr
 	}
-	if !verifyHMAC(payload, secret, signature) {
-		p.log.Info("github: invalid webhook signature, repo=" + repoFullName)
-		return nil // silently drop invalid signatures
+	if !verifyGitLabSigningToken(payload, signingToken, webhookID, timestamp, signature) {
+		p.log.Info("gitlab: invalid webhook signature, repo=" + repoFullName)
+		return nil
 	}
 
-	switch event {
-	case "pull_request":
-		p.log.Info("github: handling pull_request event, repo=" + repoFullName)
+	switch strings.ToLower(event) {
+	case "merge request hook", "merge_request":
+		p.log.Info("gitlab: handling merge_request event, repo=" + repoFullName)
 		return p.handlePREvent(repoID, projectID, payload)
-	case "push":
+	case "push hook", "push":
 		return p.handlePushEvent(repoID, projectID, payload)
 	default:
-		p.log.Info("github: unhandled event type, event=" + event)
+		p.log.Info("gitlab: unhandled event type, event=" + event)
 	}
 	return nil
 }
 
-func (p *githubPlugin) handlePREvent(repoID, projectID string, payload []byte) error {
+func (p *gitlabPlugin) handlePREvent(repoID, projectID string, payload []byte) error {
 	var event struct {
-		Action      string        `json:"action"`
-		PullRequest ghPullRequest `json:"pull_request"`
+		ObjectKind       string `json:"object_kind"`
+		ObjectAttributes struct {
+			ID           int64      `json:"id"`
+			IID          int        `json:"iid"`
+			Title        string     `json:"title"`
+			State        string     `json:"state"`
+			Action       string     `json:"action"`
+			URL          string     `json:"url"`
+			SourceBranch string     `json:"source_branch"`
+			TargetBranch string     `json:"target_branch"`
+			MergedAt     *time.Time `json:"merged_at"`
+		} `json:"object_attributes"`
+		User struct {
+			Username string `json:"username"`
+		} `json:"user"`
 	}
 	if err := json.Unmarshal(payload, &event); err != nil {
-		p.log.Error("github: failed to parse pull_request event: " + err.Error())
+		p.log.Error("gitlab: failed to parse merge_request event: " + err.Error())
 		return err
 	}
-	gh := &event.PullRequest
+	oa := event.ObjectAttributes
+	action := oa.Action
+	state := normalizeMRState(oa.State, oa.MergedAt != nil)
 
-	p.log.Info("github: processing pull_request, action=" + event.Action + ", pr_number=" + strconv.Itoa(gh.Number) + ", title=" + gh.Title + ", repo_id=" + repoID)
+	p.log.Info("gitlab: processing merge_request, action=" + action + ", mr_iid=" + strconv.Itoa(oa.IID) + ", title=" + oa.Title + ", repo_id=" + repoID)
 
-	state := gh.State
-	if gh.Merged {
-		state = "merged"
-	}
-
-	// Read the PR's previously cached state before the upsert overwrites
-	// it, so we can tell a genuine open/closed/merged transition (the
-	// github.pr_state_changed automation trigger's source) apart from a
-	// re-delivered webhook or a non-state-changing action like
-	// "synchronize"/"labeled", both of which still update the row above but
-	// shouldn't re-fire an automation. previousState == "" (no existing
-	// row) means this is the PR's first webhook delivery — not a
-	// transition, so it never fires pr_state_changed either.
 	var previousState string
-	if existing, exErr := p.db.Query(`SELECT state FROM github_pull_requests WHERE repo_id = $1 AND pr_number = $2`, repoID, gh.Number); exErr == nil && len(existing.Rows) > 0 {
+	if existing, exErr := p.db.Query(`SELECT state FROM gitlab_merge_requests WHERE repo_id = $1 AND pr_number = $2`, repoID, oa.IID); exErr == nil && len(existing.Rows) > 0 {
 		previousState = newRowScanner(existing.Columns, existing.Rows[0]).str("state")
 	}
 
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-
 	var mergedAtStr *string
-	if gh.MergedAt != nil {
-		s := gh.MergedAt.UTC().Format(time.RFC3339Nano)
+	if oa.MergedAt != nil {
+		s := oa.MergedAt.UTC().Format(time.RFC3339Nano)
 		mergedAtStr = &s
 	}
 
-	// Upsert the PR cache; let PostgreSQL generate id on insert, RETURNING gives us the id.
 	upserted, err := p.db.Query(`
-		INSERT INTO github_pull_requests
-			(project_id, repo_id, pr_number, github_pr_id, title, state, html_url, head_branch, base_branch, author, merged_at, created_at, updated_at)
+		INSERT INTO gitlab_merge_requests
+			(project_id, repo_id, pr_number, gitlab_mr_id, title, state, html_url, head_branch, base_branch, author, merged_at, created_at, updated_at)
 		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
 		ON CONFLICT (repo_id, pr_number) DO UPDATE SET
 			title=$5, state=$6, html_url=$7, head_branch=$8, base_branch=$9,
 			author=$10, merged_at=$11, updated_at=$13
 		RETURNING id
-	`, projectID, repoID, gh.Number, gh.ID, gh.Title, state,
-		gh.HTMLURL, gh.Head.Ref, gh.Base.Ref, gh.User.Login, mergedAtStr, now, now)
+	`, projectID, repoID, oa.IID, oa.ID, oa.Title, state,
+		oa.URL, oa.SourceBranch, oa.TargetBranch, event.User.Username, mergedAtStr, now, now)
 	if err != nil {
-		p.log.Error("github: failed to upsert PR: " + err.Error() + ", repo_id=" + repoID + ", pr_number=" + strconv.Itoa(gh.Number))
+		p.log.Error("gitlab: failed to upsert MR: " + err.Error() + ", repo_id=" + repoID + ", mr_iid=" + strconv.Itoa(oa.IID))
 		return err
 	}
 	var prID string
@@ -164,54 +164,47 @@ func (p *githubPlugin) handlePREvent(repoID, projectID string, payload []byte) e
 		prID = newRowScanner(upserted.Columns, upserted.Rows[0]).str("id")
 	}
 
-	p.log.Info("github: PR saved successfully, pr_id=" + prID + ", pr_number=" + strconv.Itoa(gh.Number) + ", action=" + event.Action)
-
-	// On "opened"/"reopened": auto-link to task if head branch is already linked.
-	if event.Action == "opened" || event.Action == "reopened" {
+	if action == "open" || action == "reopen" {
 		brResult, _ := p.db.Query(
-			`SELECT task_id FROM github_task_branches WHERE repo_id = $1 AND branch_name = $2`,
-			repoID, gh.Head.Ref,
+			`SELECT task_id FROM gitlab_task_branches WHERE repo_id = $1 AND branch_name = $2`,
+			repoID, oa.SourceBranch,
 		)
 		if brResult != nil && len(brResult.Rows) > 0 {
 			taskID := newRowScanner(brResult.Columns, brResult.Rows[0]).str("task_id")
 			_, _ = p.db.Exec(`
-				INSERT INTO github_task_pr_links (task_id, pull_request_id, created_at)
+				INSERT INTO gitlab_task_mr_links (task_id, merge_request_id, created_at)
 				VALUES ($1,$2,$3)
-				ON CONFLICT (task_id, pull_request_id) DO NOTHING
+				ON CONFLICT (task_id, merge_request_id) DO NOTHING
 			`, taskID, prID, now)
 
-			plugin.EmitEvent("github.pr_linked", map[string]any{
+			plugin.EmitEvent("gitlab.mr_linked", map[string]any{
 				"project_id": projectID,
 				"task_id":    taskID,
 				"repo_id":    repoID,
-				"pr_number":  gh.Number,
+				"pr_number":  oa.IID,
 			})
-			p.log.Info("github: PR auto-linked to task, task_id=" + taskID + ", pr_number=" + strconv.Itoa(gh.Number))
+			p.log.Info("gitlab: MR auto-linked to task, task_id=" + taskID + ", mr_iid=" + strconv.Itoa(oa.IID))
 		}
 	}
 
-	// Emit PR updated for all linked tasks — and, when the derived
-	// open/closed/merged state actually transitioned since the last
-	// webhook delivery, the more specific pr_state_changed event too (the
-	// github.pr_state_changed automation trigger's source).
 	stateChanged := previousState != "" && previousState != state
-	linkedResult, _ := p.db.Query(`SELECT task_id FROM github_task_pr_links WHERE pull_request_id = $1`, prID)
+	linkedResult, _ := p.db.Query(`SELECT task_id FROM gitlab_task_mr_links WHERE merge_request_id = $1`, prID)
 	if linkedResult != nil {
 		for _, row := range linkedResult.Rows {
 			taskID := newRowScanner(linkedResult.Columns, row).str("task_id")
-			plugin.EmitEvent("github.pr_updated", map[string]any{
+			plugin.EmitEvent("gitlab.mr_updated", map[string]any{
 				"project_id": projectID,
 				"task_id":    taskID,
 				"repo_id":    repoID,
-				"pr_number":  gh.Number,
-				"action":     event.Action,
+				"pr_number":  oa.IID,
+				"action":     action,
 			})
 			if stateChanged {
-				plugin.EmitEvent("github.pr_state_changed", map[string]any{
+				plugin.EmitEvent("gitlab.mr_state_changed", map[string]any{
 					"project_id": projectID,
 					"task_id":    taskID,
 					"repo_id":    repoID,
-					"pr_number":  gh.Number,
+					"pr_number":  oa.IID,
 					"from_state": previousState,
 					"to_state":   state,
 				})
@@ -221,19 +214,24 @@ func (p *githubPlugin) handlePREvent(repoID, projectID string, payload []byte) e
 	return nil
 }
 
-func (p *githubPlugin) handlePushEvent(repoID, projectID string, payload []byte) error {
+func (p *gitlabPlugin) handlePushEvent(repoID, projectID string, payload []byte) error {
 	var event struct {
 		Ref     string `json:"ref"`
-		Created bool   `json:"created"`
-		Deleted bool   `json:"deleted"`
+		Before  string `json:"before"`
+		After   string `json:"after"`
+		Created bool   `json:"created"` // not always present on GitLab
 	}
-	if err := json.Unmarshal(payload, &event); err != nil || !event.Created || event.Deleted {
+	if err := json.Unmarshal(payload, &event); err != nil {
 		return nil
 	}
-
-	// Extract "refs/heads/branch-name" → "branch-name".
 	branchName := strings.TrimPrefix(event.Ref, "refs/heads/")
 	if branchName == event.Ref {
+		return nil
+	}
+	// GitLab signals new branch with before = 40 zeros (or omitted created).
+	isCreated := event.Created || event.Before == "" || event.Before == strings.Repeat("0", 40)
+	isDeleted := event.After == strings.Repeat("0", 40)
+	if !isCreated || isDeleted {
 		return nil
 	}
 
@@ -242,7 +240,6 @@ func (p *githubPlugin) handlePushEvent(repoID, projectID string, payload []byte)
 		return nil
 	}
 
-	// Look up the task by project prefix and task number.
 	taskResult, tErr := p.db.Query(`
 		SELECT t.id FROM tasks t
 		JOIN projects pr ON pr.id = t.project_id
@@ -256,12 +253,12 @@ func (p *githubPlugin) handlePushEvent(repoID, projectID string, payload []byte)
 
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	_, _ = p.db.Exec(`
-		INSERT INTO github_task_branches (task_id, repo_id, branch_name, created_at)
+		INSERT INTO gitlab_task_branches (task_id, repo_id, branch_name, created_at)
 		VALUES ($1,$2,$3,$4)
 		ON CONFLICT (task_id, repo_id, branch_name) DO NOTHING
 	`, taskID, repoID, branchName, now)
 
-	plugin.EmitEvent("github.branch_linked", map[string]any{
+	plugin.EmitEvent("gitlab.branch_linked", map[string]any{
 		"project_id":  projectID,
 		"task_id":     taskID,
 		"repo_id":     repoID,
@@ -270,30 +267,45 @@ func (p *githubPlugin) handlePushEvent(repoID, projectID string, payload []byte)
 	return nil
 }
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
-
-func verifyHMAC(payload []byte, secret, signatureHeader string) bool {
-	const prefix = "sha256="
-	if !strings.HasPrefix(signatureHeader, prefix) {
+// verifyGitLabSigningToken validates Standard Webhooks HMAC (GitLab 19+ signing_token).
+func verifyGitLabSigningToken(payload []byte, signingToken, msgID, timestamp, signatureHeader string) bool {
+	if signingToken == "" || msgID == "" || timestamp == "" || signatureHeader == "" {
 		return false
 	}
-	expected := signatureHeader[len(prefix):]
-	mac := hmac.New(sha256.New, []byte(secret))
-	mac.Write(payload)
-	got := hex.EncodeToString(mac.Sum(nil))
-	return hmac.Equal([]byte(got), []byte(expected))
+	keyPart := strings.TrimPrefix(signingToken, "whsec_")
+	key, err := base64.StdEncoding.DecodeString(keyPart)
+	if err != nil || len(key) == 0 {
+		return false
+	}
+	signed := msgID + "." + timestamp + "." + string(payload)
+	mac := hmac.New(sha256.New, key)
+	mac.Write([]byte(signed))
+	digest := base64.StdEncoding.EncodeToString(mac.Sum(nil))
+	want := "v1," + digest
+	for _, part := range strings.Fields(signatureHeader) {
+		if hmac.Equal([]byte(part), []byte(want)) {
+			return true
+		}
+	}
+	return false
 }
 
-func extractRepoFullName(payload []byte) string {
+func extractGitLabProjectPath(payload []byte) string {
 	var v struct {
+		Project struct {
+			PathWithNamespace string `json:"path_with_namespace"`
+		} `json:"project"`
 		Repository struct {
-			FullName string `json:"full_name"`
+			PathWithNamespace string `json:"path_with_namespace"`
 		} `json:"repository"`
 	}
 	if err := json.Unmarshal(payload, &v); err != nil {
 		return ""
 	}
-	return v.Repository.FullName
+	if v.Project.PathWithNamespace != "" {
+		return v.Project.PathWithNamespace
+	}
+	return v.Repository.PathWithNamespace
 }
 
 func extractBranchTaskRef(branchName string) (prefix string, taskNumber int64, ok bool) {
@@ -306,4 +318,18 @@ func extractBranchTaskRef(branchName string) (prefix string, taskNumber int64, o
 		return "", 0, false
 	}
 	return strings.ToUpper(m[1]), n, true
+}
+
+func normalizeMRState(state string, merged bool) string {
+	if merged || strings.EqualFold(state, "merged") {
+		return "merged"
+	}
+	switch strings.ToLower(state) {
+	case "opened", "open", "locked", "reopened":
+		return "open"
+	case "closed":
+		return "closed"
+	default:
+		return strings.ToLower(state)
+	}
 }

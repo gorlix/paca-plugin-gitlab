@@ -79,7 +79,7 @@ func decryptAES(cipherHex, hexKey string) (string, error) {
 }
 
 // encryptionKey reads the encryption key from the plugin config.
-func (p *githubPlugin) encryptionKey() (string, error) {
+func (p *gitlabPlugin) encryptionKey() (string, error) {
 	key, ok := p.cfg.Get("ENCRYPTION_KEY")
 	if !ok || key == "" {
 		return "", errors.New("ENCRYPTION_KEY not configured")
@@ -88,7 +88,7 @@ func (p *githubPlugin) encryptionKey() (string, error) {
 }
 
 // encrypt encrypts plaintext with the configured AES key.
-func (p *githubPlugin) encrypt(plaintext string) (string, error) {
+func (p *gitlabPlugin) encrypt(plaintext string) (string, error) {
 	key, err := p.encryptionKey()
 	if err != nil {
 		return "", err
@@ -97,7 +97,7 @@ func (p *githubPlugin) encrypt(plaintext string) (string, error) {
 }
 
 // decrypt decrypts ciphertext with the configured AES key.
-func (p *githubPlugin) decrypt(ciphertext string) (string, error) {
+func (p *gitlabPlugin) decrypt(ciphertext string) (string, error) {
 	key, err := p.encryptionKey()
 	if err != nil {
 		return "", err

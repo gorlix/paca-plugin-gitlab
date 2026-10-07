@@ -443,7 +443,7 @@ function AddRepoDialog({
       }
       if (code === ErrorCode.GitLabWebhookCreationFailed) {
         setError(
-          "Could not create the webhook. Make sure your token has the admin:repo_hook scope and you have admin access to the repository.",
+          "Could not create the webhook. Ensure the token has the api scope, you have Maintainer/Owner on the project, and PUBLIC_URL is a public HTTPS URL GitLab can reach.",
         );
         return;
       }
@@ -453,7 +453,7 @@ function AddRepoDialog({
       }
       if (code === ErrorCode.GitLabRepoNotAccessible) {
         setError(
-          "Repository not found or not accessible. Check that your token has the repo scope.",
+          "Repository not found or not accessible. Check that your token has the api scope.",
         );
         return;
       }

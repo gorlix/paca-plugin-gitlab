@@ -35,6 +35,7 @@ import {
   taskPRsKey,
   unlinkPRFromTask,
 } from "./gitlab-api";
+import { t } from "./i18n";
 
 // ── Utilities ──────────────────────────────────────────────────────────────────
 
@@ -46,12 +47,18 @@ function cn(...classes: (string | undefined | null | false)[]): string {
 
 // ── PR state badge ────────────────────────────────────────────────────────────
 
-function PRStateBadge({ state }: { state: PullRequest["state"] }) {
+function PRStateBadge({
+  state,
+  locale,
+}: {
+  state: PullRequest["state"];
+  locale?: string;
+}) {
   if (state === "merged") {
     return (
       <span className="inline-flex items-center gap-1 rounded-full bg-violet-500/15 px-2 py-0.5 text-xs font-semibold text-violet-500">
         <GitMerge className="size-3" />
-        Merged
+        {t("task.mr.state.merged", locale)}
       </span>
     );
   }
@@ -59,14 +66,14 @@ function PRStateBadge({ state }: { state: PullRequest["state"] }) {
     return (
       <span className="inline-flex items-center gap-1 rounded-full bg-destructive/15 px-2 py-0.5 text-xs font-semibold text-destructive/80">
         <GitPullRequestClosed className="size-3" />
-        Closed
+        {t("task.mr.state.closed", locale)}
       </span>
     );
   }
   return (
-      <span className="inline-flex items-center gap-1 rounded-full bg-emerald-500/15 px-2 py-0.5 text-xs font-semibold text-emerald-600 dark:text-emerald-500">
+    <span className="inline-flex items-center gap-1 rounded-full bg-emerald-500/15 px-2 py-0.5 text-xs font-semibold text-emerald-600 dark:text-emerald-500">
       <GitPullRequest className="size-3" />
-      Open
+      {t("task.mr.state.open", locale)}
     </span>
   );
 }
@@ -79,12 +86,14 @@ function PRRow({
   projectId,
   taskId,
   canEdit,
+  locale,
 }: {
   api: PluginApiClient;
   pr: PullRequest;
   projectId: string;
   taskId: string;
   canEdit: boolean;
+  locale?: string;
 }) {
   const queryClient = useQueryClient();
 
@@ -100,7 +109,7 @@ function PRRow({
   return (
     <div className="group flex items-start gap-2.5 rounded-lg border border-border/50 bg-card px-3 py-2.5 hover:border-border/80 transition-colors">
       <div className="mt-0.5 shrink-0">
-        <PRStateBadge state={pr.state} />
+        <PRStateBadge state={pr.state} locale={locale} />
       </div>
       <div className="min-w-0 flex-1">
         <a
@@ -124,7 +133,7 @@ function PRRow({
             <>
               <span className="text-muted-foreground/40">·</span>
               <span className="text-xs text-muted-foreground">
-                by {pr.author}
+                {t("task.mr.by", locale, { author: pr.author })}
               </span>
             </>
           )}
@@ -133,7 +142,7 @@ function PRRow({
       {canEdit && (
         <button
           type="button"
-          aria-label="Unlink merge request"
+          aria-label={t("task.mr.unlink", locale)}
           className="shrink-0 mt-0.5 opacity-0 group-hover:opacity-100 transition-opacity text-muted-foreground/60 hover:text-destructive"
           onClick={() => unlinkMutation.mutate()}
           disabled={unlinkMutation.isPending}
@@ -177,12 +186,14 @@ function LinkPRForm({
   taskId,
   repos,
   onDone,
+  locale,
 }: {
   api: PluginApiClient;
   projectId: string;
   taskId: string;
   repos: LinkedRepository[];
   onDone: () => void;
+  locale?: string;
 }) {
   const queryClient = useQueryClient();
   const [selectedRepoId, setSelectedRepoId] = useState(
@@ -213,32 +224,32 @@ function LinkPRForm({
     onError: (err: unknown) => {
       const code = getPluginErrorCode(err);
       if (code === ErrorCode.GitLabIntegrationNotFound) {
-        setError("No GitLab token configured for this project.");
+        setError(t("task.mr.error.noToken", locale));
         return;
       }
       if (code === ErrorCode.GitLabRepositoryNotFound) {
-        setError("Repository not found. It may have been unlinked.");
+        setError(t("task.mr.error.repoNotFound", locale));
         return;
       }
       if (code === ErrorCode.GitLabPRNotFound) {
         const displayNum = parsed ? parsed.prNumber : value;
         setError(
-          `PR #${displayNum} was not found in the selected repository.`,
+          t("task.mr.error.prNotFound", locale, { number: displayNum }),
         );
         return;
       }
       if (code === ErrorCode.GitLabPRAlreadyLinked) {
         const displayNum = parsed ? parsed.prNumber : value;
-        setError(`PR #${displayNum} is already linked to this task.`);
-        return;
-      }
-      if (code === ErrorCode.GitLabTokenInsufficientPermissions) {
         setError(
-          "Your GitLab token does not have permission to read merge requests. Update it in Project Settings > GitLab.",
+          t("task.mr.error.alreadyLinked", locale, { number: displayNum }),
         );
         return;
       }
-      setError("Failed to link merge request. Please try again.");
+      if (code === ErrorCode.GitLabTokenInsufficientPermissions) {
+        setError(t("task.mr.error.permissions", locale));
+        return;
+      }
+      setError(t("task.mr.error.generic", locale));
     },
   });
 
@@ -246,18 +257,18 @@ function LinkPRForm({
     if (parsed) {
       if (!urlMatchedRepo) {
         setError(
-          `Repository "${parsed.fullName}" is not linked to this project.`,
+          t("task.mr.error.repoNotLinked", locale, { name: parsed.fullName }),
         );
         return;
       }
     } else {
       if (!effectiveRepoId) {
-        setError("Select a repository.");
+        setError(t("task.mr.error.selectRepo", locale));
         return;
       }
       const num = Number(value);
       if (!value.trim() || !Number.isInteger(num) || num <= 0) {
-        setError("Enter a valid PR number or paste a GitLab PR URL.");
+        setError(t("task.mr.error.invalidInput", locale));
         return;
       }
     }
@@ -268,7 +279,9 @@ function LinkPRForm({
     <div className="space-y-3 rounded-lg border border-border/50 bg-card px-3 py-3">
       {/* Repository selector */}
       <div>
-        <p className="text-xs text-muted-foreground mb-1">Repository</p>
+        <p className="text-xs text-muted-foreground mb-1">
+          {t("task.mr.repository", locale)}
+        </p>
         <select
           value={parsed ? (urlMatchedRepo?.id ?? "") : selectedRepoId}
           onChange={(e) => {
@@ -278,7 +291,7 @@ function LinkPRForm({
           disabled={mutation.isPending || !!parsed}
           className="w-full rounded-md border border-border/60 bg-background px-2.5 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-ring disabled:opacity-50"
         >
-          <option value="">Select repository…</option>
+          <option value="">{t("task.mr.selectRepo", locale)}</option>
           {repos.map((r) => (
             <option key={r.id} value={r.id}>
               {r.full_name}
@@ -290,7 +303,7 @@ function LinkPRForm({
       {/* PR number or URL */}
       <div>
         <p className="text-xs text-muted-foreground mb-1">
-          PR number or GitLab URL
+          {t("task.mr.inputLabel", locale)}
         </p>
         <input
           type="text"
@@ -303,7 +316,7 @@ function LinkPRForm({
             if (e.key === "Enter") submit();
             if (e.key === "Escape") onDone();
           }}
-          placeholder="42 or https://gitlab.com/owner/repo/-/merge_requests/42"
+          placeholder={t("task.mr.placeholder", locale)}
           className={cn(
             "w-full rounded-md border bg-background px-2.5 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-ring",
             error ? "border-destructive" : "border-border/60",
@@ -314,8 +327,10 @@ function LinkPRForm({
         />
         {parsed && urlMatchedRepo && (
           <p className="mt-1 text-xs text-muted-foreground">
-            Will link PR #{parsed.prNumber} from{" "}
-            <span className="font-medium">{urlMatchedRepo.full_name}</span>
+            {t("task.mr.willLink", locale, {
+              number: parsed.prNumber,
+              repo: urlMatchedRepo.full_name,
+            })}
           </p>
         )}
       </div>
@@ -339,14 +354,14 @@ function LinkPRForm({
           ) : (
             <GitPullRequest className="size-3.5" />
           )}
-          Link merge request
+          {t("task.mr.link", locale)}
         </button>
         <button
           type="button"
           onClick={onDone}
           className="text-xs text-muted-foreground/60 hover:text-muted-foreground transition-colors"
         >
-          Cancel
+          {t("common.cancel", locale)}
         </button>
       </div>
     </div>
@@ -360,11 +375,13 @@ function PullRequestsSection({
   projectId,
   taskId,
   canEdit,
+  locale,
 }: {
   api: PluginApiClient;
   projectId: string;
   taskId: string;
   canEdit: boolean;
+  locale?: string;
 }) {
   const { data: prs = [], isLoading } = useQuery<PullRequest[]>({
     queryKey: taskPRsKey(projectId, taskId),
@@ -392,7 +409,7 @@ function PullRequestsSection({
         onClick={() => setExpanded((v) => !v)}
       >
         <GitPullRequest className="size-3.5 shrink-0" />
-        <span>Merge Requests</span>
+        <span>{t("task.mr.title", locale)}</span>
         {count > 0 && (
           <span className="rounded-full bg-muted px-1.5 py-0.5 text-xs font-bold text-muted-foreground normal-case tracking-normal">
             {count}
@@ -411,7 +428,7 @@ function PullRequestsSection({
           {isLoading ? (
             <div className="flex items-center gap-2 py-2 text-muted-foreground/60 text-xs">
               <Loader2 className="size-3.5 animate-spin" />
-              Loading…
+              {t("common.loading", locale)}
             </div>
           ) : (
             <>
@@ -423,12 +440,13 @@ function PullRequestsSection({
                   projectId={projectId}
                   taskId={taskId}
                   canEdit={canEdit}
+                  locale={locale}
                 />
               ))}
 
               {count === 0 && !linking && (
                 <p className="text-xs text-muted-foreground/50 italic py-1">
-                  No merge requests linked yet.
+                  {t("task.mr.empty", locale)}
                 </p>
               )}
 
@@ -439,6 +457,7 @@ function PullRequestsSection({
                   taskId={taskId}
                   repos={linkedRepos}
                   onDone={() => setLinking(false)}
+                  locale={locale}
                 />
               ) : (
                 canLinkPR && (
@@ -448,7 +467,7 @@ function PullRequestsSection({
                     onClick={() => setLinking(true)}
                   >
                     <Plus className="size-3.5" />
-                    Link merge request
+                    {t("task.mr.link", locale)}
                   </button>
                 )
               )}
@@ -464,7 +483,7 @@ function PullRequestsSection({
 
 // ── Copy button ───────────────────────────────────────────────────────────────
 
-function CopyButton({ text }: { text: string }) {
+function CopyButton({ text, locale }: { text: string; locale?: string }) {
   const [copied, setCopied] = useState(false);
 
   const handleCopy = () => {
@@ -476,7 +495,7 @@ function CopyButton({ text }: { text: string }) {
   return (
     <button
       type="button"
-      aria-label="Copy to clipboard"
+      aria-label={t("task.branch.copy", locale)}
       onClick={handleCopy}
       className="shrink-0 text-muted-foreground/60 hover:text-muted-foreground transition-colors"
     >
@@ -491,21 +510,33 @@ function CopyButton({ text }: { text: string }) {
 
 // ── Command block ─────────────────────────────────────────────────────────────
 
-function CommandBlock({ command }: { command: string }) {
+function CommandBlock({
+  command,
+  locale,
+}: {
+  command: string;
+  locale?: string;
+}) {
   return (
     <div className="flex items-center gap-2 rounded-md bg-muted/60 border border-border/50 px-3 py-2 mt-1.5">
       <Terminal className="size-3.5 shrink-0 text-muted-foreground/50" />
       <code className="flex-1 text-xs font-mono text-foreground/80 break-all">
         {command}
       </code>
-      <CopyButton text={command} />
+      <CopyButton text={command} locale={locale} />
     </div>
   );
 }
 
 // ── Existing branch row ───────────────────────────────────────────────────────
 
-function BranchRow({ branch }: { branch: TaskBranch }) {
+function BranchRow({
+  branch,
+  locale,
+}: {
+  branch: TaskBranch;
+  locale?: string;
+}) {
   const cloneCmd = `git fetch origin && git checkout ${branch.branch_name}`;
   return (
     <div className="rounded-lg border border-border/50 bg-card px-3 py-2.5 space-y-1.5">
@@ -515,7 +546,7 @@ function BranchRow({ branch }: { branch: TaskBranch }) {
           {branch.branch_name}
         </span>
       </div>
-      <CommandBlock command={cloneCmd} />
+      <CommandBlock command={cloneCmd} locale={locale} />
     </div>
   );
 }
@@ -540,6 +571,7 @@ function CreateBranchForm({
   taskTitle,
   repos,
   onDone,
+  locale,
 }: {
   api: PluginApiClient;
   projectId: string;
@@ -549,6 +581,7 @@ function CreateBranchForm({
   taskTitle?: string;
   repos: { id: string; full_name: string }[];
   onDone: () => void;
+  locale?: string;
 }) {
   const queryClient = useQueryClient();
 
@@ -601,24 +634,22 @@ function CreateBranchForm({
     onError: (err: unknown) => {
       const code = getPluginErrorCode(err);
       if (code === ErrorCode.GitLabIntegrationNotFound) {
-        setError("No GitLab token configured for this project.");
+        setError(t("task.branch.error.noToken", locale));
         return;
       }
       if (code === ErrorCode.GitLabRepositoryNotFound) {
-        setError("Repository not found. It may have been unlinked.");
+        setError(t("task.branch.error.repoNotFound", locale));
         return;
       }
       if (code === ErrorCode.GitLabBranchAlreadyLinked) {
-        setError("This branch is already linked to the task.");
+        setError(t("task.branch.error.alreadyLinked", locale));
         return;
       }
       if (code === ErrorCode.GitLabTokenInsufficientPermissions) {
-        setError(
-          "Your GitLab token does not have permission to create branches. Please update it in Project Settings > GitLab with a token that has the repo (contents) scope.",
-        );
+        setError(t("task.branch.error.permissionsCreate", locale));
         return;
       }
-      setError("Failed to create branch. Please try again.");
+      setError(t("task.branch.error.createFailed", locale));
     },
   });
 
@@ -626,11 +657,11 @@ function CreateBranchForm({
 
   function validateForm(): boolean {
     if (!branchName.trim()) {
-      setError("Branch name is required.");
+      setError(t("task.branch.error.nameRequired", locale));
       return false;
     }
     if (repos.length > 1 && !selectedRepoId) {
-      setError("Select a repository.");
+      setError(t("task.branch.error.selectRepo", locale));
       return false;
     }
     return true;
@@ -646,21 +677,23 @@ function CreateBranchForm({
     <div className="space-y-3 rounded-lg border border-border/50 bg-card px-3 py-3">
       {/* Branch type pills */}
       <div>
-        <p className="text-xs text-muted-foreground mb-1.5">Type</p>
+        <p className="text-xs text-muted-foreground mb-1.5">
+          {t("task.branch.type", locale)}
+        </p>
         <div className="flex flex-wrap gap-1.5">
-          {BRANCH_TYPES.map((t) => (
+          {BRANCH_TYPES.map((branchType) => (
             <button
-              key={t}
+              key={branchType}
               type="button"
-              onClick={() => handleTypeChange(t)}
+              onClick={() => handleTypeChange(branchType)}
               className={cn(
                 "rounded-full px-2.5 py-0.5 text-xs font-medium border transition-colors",
-                t === type
+                branchType === type
                   ? "border-primary/60 bg-primary/10 text-primary"
                   : "border-border/50 text-muted-foreground hover:border-border",
               )}
             >
-              {t}
+              {branchType}
             </button>
           ))}
         </div>
@@ -668,7 +701,9 @@ function CreateBranchForm({
 
       {/* Branch name */}
       <div>
-        <p className="text-xs text-muted-foreground mb-1">Branch name</p>
+        <p className="text-xs text-muted-foreground mb-1">
+          {t("task.branch.name", locale)}
+        </p>
         <input
           type="text"
           value={branchName}
@@ -685,13 +720,15 @@ function CreateBranchForm({
       {/* Repo selector — only when multiple repos */}
       {repos.length > 1 && (
         <div>
-          <p className="text-xs text-muted-foreground mb-1">Repository</p>
+          <p className="text-xs text-muted-foreground mb-1">
+            {t("task.branch.repository", locale)}
+          </p>
           <select
             value={selectedRepoId}
             onChange={(e) => setSelectedRepoId(e.target.value)}
             className="w-full rounded-md border border-border/60 bg-background px-2.5 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-ring"
           >
-            <option value="">Select repository…</option>
+            <option value="">{t("task.branch.selectRepo", locale)}</option>
             {repos.map((r) => (
               <option key={r.id} value={r.id}>
                 {r.full_name}
@@ -704,8 +741,10 @@ function CreateBranchForm({
       {/* Source branch (optional) */}
       <div>
         <p className="text-xs text-muted-foreground mb-1">
-          Source branch{" "}
-          <span className="opacity-60">(optional, defaults to repo default)</span>
+          {t("task.branch.source", locale)}{" "}
+          <span className="opacity-60">
+            {t("task.branch.sourceOptional", locale)}
+          </span>
         </p>
         <input
           type="text"
@@ -736,14 +775,14 @@ function CreateBranchForm({
           ) : (
             <GitBranch className="size-3.5" />
           )}
-          Create branch on GitLab
+          {t("task.branch.create", locale)}
         </button>
 
         <div>
           <p className="text-xs text-muted-foreground mb-0.5">
-            Or create locally:
+            {t("task.branch.orLocal", locale)}
           </p>
-          <CommandBlock command={localCmd} />
+          <CommandBlock command={localCmd} locale={locale} />
         </div>
       </div>
 
@@ -752,7 +791,7 @@ function CreateBranchForm({
         className="text-xs text-muted-foreground/60 hover:text-muted-foreground transition-colors"
         onClick={onDone}
       >
-        Cancel
+        {t("common.cancel", locale)}
       </button>
     </div>
   );
@@ -785,12 +824,14 @@ function LinkBranchForm({
   taskId,
   repos,
   onDone,
+  locale,
 }: {
   api: PluginApiClient;
   projectId: string;
   taskId: string;
   repos: LinkedRepository[];
   onDone: () => void;
+  locale?: string;
 }) {
   const queryClient = useQueryClient();
   const [selectedRepoId, setSelectedRepoId] = useState(
@@ -819,30 +860,32 @@ function LinkBranchForm({
     onError: (err: unknown) => {
       const code = getPluginErrorCode(err);
       if (code === ErrorCode.GitLabIntegrationNotFound) {
-        setError("No GitLab token configured for this project.");
+        setError(t("task.branch.error.noToken", locale));
         return;
       }
       if (code === ErrorCode.GitLabRepositoryNotFound) {
-        setError("Repository not found. It may have been unlinked.");
+        setError(t("task.branch.error.repoNotFound", locale));
         return;
       }
       if (code === ErrorCode.GitLabBranchNotFound) {
         setError(
-          `Branch "${branchName}" was not found in the selected repository.`,
+          t("task.branch.error.notFound", locale, { branch: branchName }),
         );
         return;
       }
       if (code === ErrorCode.GitLabBranchAlreadyLinked) {
-        setError(`Branch "${branchName}" is already linked to this task.`);
-        return;
-      }
-      if (code === ErrorCode.GitLabTokenInsufficientPermissions) {
         setError(
-          "Your GitLab token does not have permission to read branches. Update it in Project Settings > GitLab.",
+          t("task.branch.error.alreadyLinkedNamed", locale, {
+            branch: branchName,
+          }),
         );
         return;
       }
-      setError("Failed to link branch. Please try again.");
+      if (code === ErrorCode.GitLabTokenInsufficientPermissions) {
+        setError(t("task.branch.error.permissionsRead", locale));
+        return;
+      }
+      setError(t("task.branch.error.linkFailed", locale));
     },
   });
 
@@ -850,17 +893,19 @@ function LinkBranchForm({
     if (parsed) {
       if (!urlMatchedRepo) {
         setError(
-          `Repository "${parsed.fullName}" is not linked to this project.`,
+          t("task.branch.error.repoNotLinked", locale, {
+            name: parsed.fullName,
+          }),
         );
         return;
       }
     } else {
       if (!effectiveRepoId) {
-        setError("Select a repository.");
+        setError(t("task.branch.error.selectRepo", locale));
         return;
       }
       if (!branchName) {
-        setError("Enter a branch name or paste a GitLab branch URL.");
+        setError(t("task.branch.error.invalidInput", locale));
         return;
       }
     }
@@ -871,7 +916,9 @@ function LinkBranchForm({
     <div className="space-y-3 rounded-lg border border-border/50 bg-card px-3 py-3">
       {/* Repository selector */}
       <div>
-        <p className="text-xs text-muted-foreground mb-1">Repository</p>
+        <p className="text-xs text-muted-foreground mb-1">
+          {t("task.branch.repository", locale)}
+        </p>
         <select
           value={parsed ? (urlMatchedRepo?.id ?? "") : selectedRepoId}
           onChange={(e) => {
@@ -881,7 +928,7 @@ function LinkBranchForm({
           disabled={mutation.isPending || !!parsed}
           className="w-full rounded-md border border-border/60 bg-background px-2.5 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-ring disabled:opacity-50"
         >
-          <option value="">Select repository…</option>
+          <option value="">{t("task.branch.selectRepo", locale)}</option>
           {repos.map((r) => (
             <option key={r.id} value={r.id}>
               {r.full_name}
@@ -893,7 +940,7 @@ function LinkBranchForm({
       {/* Branch name or URL */}
       <div>
         <p className="text-xs text-muted-foreground mb-1">
-          Branch name or GitLab URL
+          {t("task.branch.nameOrUrl", locale)}
         </p>
         <input
           type="text"
@@ -906,7 +953,7 @@ function LinkBranchForm({
             if (e.key === "Enter") submit();
             if (e.key === "Escape") onDone();
           }}
-          placeholder="feature/foo or https://gitlab.com/owner/repo/tree/feature/foo"
+          placeholder={t("task.branch.placeholder", locale)}
           className={cn(
             "w-full rounded-md border bg-background px-2.5 py-1.5 text-xs font-mono focus:outline-none focus:ring-1 focus:ring-ring",
             error ? "border-destructive" : "border-border/60",
@@ -918,11 +965,10 @@ function LinkBranchForm({
         />
         {parsed && urlMatchedRepo && (
           <p className="mt-1 text-xs text-muted-foreground">
-            Will link branch{" "}
-            <span className="font-medium font-mono">
-              {parsed.branchName}
-            </span>{" "}
-            from <span className="font-medium">{urlMatchedRepo.full_name}</span>
+            {t("task.branch.willLink", locale, {
+              branch: parsed.branchName,
+              repo: urlMatchedRepo.full_name,
+            })}
           </p>
         )}
       </div>
@@ -946,14 +992,14 @@ function LinkBranchForm({
           ) : (
             <Link2 className="size-3.5" />
           )}
-          Link branch
+          {t("task.branch.linkAction", locale)}
         </button>
         <button
           type="button"
           onClick={onDone}
           className="text-xs text-muted-foreground/60 hover:text-muted-foreground transition-colors"
         >
-          Cancel
+          {t("common.cancel", locale)}
         </button>
       </div>
     </div>
@@ -970,6 +1016,7 @@ function BranchesSection({
   taskNumber,
   taskTitle,
   canEdit,
+  locale,
 }: {
   api: PluginApiClient;
   projectId: string;
@@ -978,6 +1025,7 @@ function BranchesSection({
   taskNumber: number;
   taskTitle?: string;
   canEdit: boolean;
+  locale?: string;
 }) {
   const [expanded, setExpanded] = useState(true);
   const [mode, setMode] = useState<"create" | "link" | null>(null);
@@ -1007,7 +1055,7 @@ function BranchesSection({
         onClick={() => setExpanded((v) => !v)}
       >
         <GitBranch className="size-3.5 shrink-0" />
-        <span>Branches</span>
+        <span>{t("task.branch.title", locale)}</span>
         {count > 0 && (
           <span className="rounded-full bg-muted px-1.5 py-0.5 text-xs font-bold text-muted-foreground normal-case tracking-normal">
             {count}
@@ -1026,17 +1074,17 @@ function BranchesSection({
           {isLoading ? (
             <div className="flex items-center gap-2 py-2 text-muted-foreground/60 text-xs">
               <Loader2 className="size-3.5 animate-spin" />
-              Loading…
+              {t("common.loading", locale)}
             </div>
           ) : (
             <>
               {branches.map((branch) => (
-                <BranchRow key={branch.id} branch={branch} />
+                <BranchRow key={branch.id} branch={branch} locale={locale} />
               ))}
 
               {count === 0 && mode === null && (
                 <p className="text-xs text-muted-foreground/50 italic py-1">
-                  No branches linked yet.
+                  {t("task.branch.empty", locale)}
                 </p>
               )}
 
@@ -1050,6 +1098,7 @@ function BranchesSection({
                   taskTitle={taskTitle}
                   repos={linkedRepos}
                   onDone={() => setMode(null)}
+                  locale={locale}
                 />
               )}
 
@@ -1060,6 +1109,7 @@ function BranchesSection({
                   taskId={taskId}
                   repos={linkedRepos}
                   onDone={() => setMode(null)}
+                  locale={locale}
                 />
               )}
 
@@ -1071,7 +1121,7 @@ function BranchesSection({
                     onClick={() => setMode("create")}
                   >
                     <GitBranch className="size-3.5" />
-                    Create branch
+                    {t("task.branch.createShort", locale)}
                   </button>
                   <button
                     type="button"
@@ -1079,7 +1129,7 @@ function BranchesSection({
                     onClick={() => setMode("link")}
                   >
                     <Link2 className="size-3.5" />
-                    Link existing branch
+                    {t("task.branch.link", locale)}
                   </button>
                 </div>
               )}
@@ -1097,6 +1147,8 @@ interface GitLabTaskSectionProps {
   projectId: string;
   taskId: string;
   canEdit?: boolean;
+  /** Host locale hint (e.g. "it", "en-US"). Falls back to navigator.language. */
+  locale?: string;
 }
 
 function GitLabTaskSectionInner({
@@ -1104,11 +1156,13 @@ function GitLabTaskSectionInner({
   projectId,
   taskId,
   canEdit,
+  locale,
 }: {
   api: PluginApiClient;
   projectId: string;
   taskId: string;
   canEdit: boolean;
+  locale?: string;
 }) {
   // Fetch task and project metadata needed for branch creation
   const { data: task } = useQuery({
@@ -1148,12 +1202,14 @@ function GitLabTaskSectionInner({
         taskNumber={taskNumber}
         taskTitle={taskTitle}
         canEdit={canEdit}
+        locale={locale}
       />
       <PullRequestsSection
         api={api}
         projectId={projectId}
         taskId={taskId}
         canEdit={canEdit}
+        locale={locale}
       />
     </div>
   );
@@ -1163,6 +1219,7 @@ export default function GitLabTaskSection({
   projectId,
   taskId,
   canEdit = true,
+  locale,
 }: GitLabTaskSectionProps) {
   const api = useMemo(
     () =>
@@ -1182,6 +1239,7 @@ export default function GitLabTaskSection({
         projectId={projectId}
         taskId={taskId}
         canEdit={canEdit}
+        locale={locale}
       />
     </PluginQueryClientProvider>
   );

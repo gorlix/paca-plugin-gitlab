@@ -15,9 +15,20 @@ export function resolveLocale(raw?: string | null): Locale {
   return v === "it" ? "it" : "en";
 }
 
-export function t(key: MessageKey, locale?: string | null): string {
+/** Simple `{name}` interpolation; missing vars are left as-is. */
+export function t(
+  key: MessageKey,
+  locale?: string | null,
+  vars?: Record<string, string | number>,
+): string {
   const loc = resolveLocale(locale);
-  return catalogs[loc][key] ?? catalogs.en[key] ?? key;
+  let msg = catalogs[loc][key] ?? catalogs.en[key] ?? key;
+  if (vars) {
+    for (const [name, value] of Object.entries(vars)) {
+      msg = msg.split(`{${name}}`).join(String(value));
+    }
+  }
+  return msg;
 }
 
 export type { MessageKey };

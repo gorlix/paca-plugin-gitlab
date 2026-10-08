@@ -226,7 +226,7 @@ function TokenCard({
       setConfirmOpen(false);
     },
     onError: () => {
-      setError("Failed to remove token. Please try again.");
+      setError(t("settings.token.removeFailed", locale));
     },
   });
 
@@ -239,9 +239,11 @@ function TokenCard({
               <Check className="size-4 text-emerald-500" />
             </div>
             <div>
-              <p className="text-sm font-medium">Personal access token saved</p>
+              <p className="text-sm font-medium">
+                {t("settings.token.saved", locale)}
+              </p>
               <p className="text-xs text-muted-foreground mt-0.5">
-                Token is stored encrypted. It is never returned by the API.
+                {t("settings.token.encrypted", locale)}
               </p>
             </div>
           </div>
@@ -258,7 +260,7 @@ function TokenCard({
               ) : (
                 <Trash2 className="size-3.5" />
               )}
-              Remove token
+              {t("settings.token.remove", locale)}
             </Btn>
           )}
         </div>
@@ -269,15 +271,14 @@ function TokenCard({
               <KeyRound className="size-5 text-destructive" />
             </div>
             <h2 className="text-base font-semibold leading-none mb-1.5">
-              Remove GitLab token
+              {t("settings.token.removeTitle", locale)}
             </h2>
             <p className="text-sm text-muted-foreground mb-4">
-              Removing the token will also unlink all repositories and disable
-              webhook events. This action cannot be undone.
+              {t("settings.token.removeBody", locale)}
             </p>
             {deleteMutation.isError && (
               <p className="text-xs text-destructive bg-destructive/10 rounded-lg px-3 py-2 mb-4">
-                Failed to remove token. Please try again.
+                {t("settings.token.removeFailed", locale)}
               </p>
             )}
             <div className="flex justify-end gap-2">
@@ -287,7 +288,7 @@ function TokenCard({
                 disabled={deleteMutation.isPending}
                 onClick={() => setConfirmOpen(false)}
               >
-                Cancel
+                {t("settings.token.cancel", locale)}
               </Btn>
               <Btn
                 variant="destructive"
@@ -298,10 +299,10 @@ function TokenCard({
                 {deleteMutation.isPending ? (
                   <>
                     <Loader2 className="size-3.5 animate-spin" />
-                    Removing…
+                    {t("settings.token.removing", locale)}
                   </>
                 ) : (
-                  "Remove token"
+                  t("settings.token.remove", locale)
                 )}
               </Btn>
             </div>
@@ -314,10 +315,12 @@ function TokenCard({
   return (
     <div className="space-y-4 max-w-lg">
       <p className="text-sm text-muted-foreground">
-        {t("settings.instanceUrl.hint", locale)}. Use a Personal, Project, or
-        Group Access Token with scope{" "}
-        <code className="rounded bg-muted px-1 py-0.5 text-xs font-mono">api</code>{" "}
-        (Maintainer/Owner required to create project webhooks).
+        {t("settings.instanceUrl.hint", locale)}.{" "}
+        {t("settings.token.scopeHintBefore", locale)}{" "}
+        <code className="rounded bg-muted px-1 py-0.5 text-xs font-mono">
+          api
+        </code>{" "}
+        {t("settings.token.scopeHintAfter", locale)}
       </p>
       <label className="block space-y-1.5">
         <span className="text-xs font-medium text-muted-foreground">
@@ -340,8 +343,12 @@ function TokenCard({
           disabled={!canEdit || saveMutation.isPending}
           onChange={(e) => setTokenKind(e.target.value as GitLabTokenKind)}
         >
-          <option value="personal">{t("settings.token.kind.personal", locale)}</option>
-          <option value="project">{t("settings.token.kind.project", locale)}</option>
+          <option value="personal">
+            {t("settings.token.kind.personal", locale)}
+          </option>
+          <option value="project">
+            {t("settings.token.kind.project", locale)}
+          </option>
           <option value="group">{t("settings.token.kind.group", locale)}</option>
         </select>
       </label>
@@ -375,7 +382,9 @@ function TokenCard({
               onClick={() => setShowToken((v) => !v)}
               tabIndex={-1}
             >
-              {showToken ? "hide" : "show"}
+              {showToken
+                ? t("settings.token.hide", locale)
+                : t("settings.token.show", locale)}
             </button>
           </div>
           <Btn
@@ -403,11 +412,13 @@ function AddRepoDialog({
   projectId,
   open,
   onOpenChange,
+  locale,
 }: {
   api: PluginApiClient;
   projectId: string;
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  locale?: string;
 }) {
   const queryClient = useQueryClient();
   const {
@@ -436,28 +447,22 @@ function AddRepoDialog({
     onError: (err: unknown) => {
       const code = getPluginErrorCode(err);
       if (code === ErrorCode.GitLabWebhookURLNotPublic) {
-        setError(
-          "Cannot register webhook because this API URL is not publicly reachable (for example localhost). Configure PUBLIC_URL to a public HTTPS URL and try again.",
-        );
+        setError(t("settings.addRepo.error.webhookNotPublic", locale));
         return;
       }
       if (code === ErrorCode.GitLabWebhookCreationFailed) {
-        setError(
-          "Could not create the webhook. Ensure the token has the api scope, you have Maintainer/Owner on the project, and PUBLIC_URL is a public HTTPS URL GitLab can reach.",
-        );
+        setError(t("settings.addRepo.error.webhookFailed", locale));
         return;
       }
       if (code === ErrorCode.GitLabRepoAlreadyLinked) {
-        setError("This repository is already linked to the project.");
+        setError(t("settings.addRepo.error.alreadyLinked", locale));
         return;
       }
       if (code === ErrorCode.GitLabRepoNotAccessible) {
-        setError(
-          "Repository not found or not accessible. Check that your token has the api scope.",
-        );
+        setError(t("settings.addRepo.error.notAccessible", locale));
         return;
       }
-      setError("Failed to link repository. Please try again.");
+      setError(t("settings.addRepo.error.generic", locale));
     },
   });
 
@@ -480,11 +485,12 @@ function AddRepoDialog({
           <div className="flex size-9 items-center justify-center rounded-full bg-primary/10 shrink-0">
             <GitBranch className="size-4 text-primary" />
           </div>
-          <h2 className="text-base font-semibold">Add repository</h2>
+          <h2 className="text-base font-semibold">
+            {t("settings.addRepo.title", locale)}
+          </h2>
         </div>
         <p className="text-sm text-muted-foreground mb-4">
-          Select a repository from your GitLab account to link to this project.
-          A webhook will be registered automatically.
+          {t("settings.addRepo.desc", locale)}
         </p>
 
         {/* Search + reload */}
@@ -492,7 +498,7 @@ function AddRepoDialog({
           <div className="relative flex-1">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 size-3.5 text-muted-foreground/60" />
             <Inp
-              placeholder="Search repositories…"
+              placeholder={t("settings.addRepo.search", locale)}
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               className="pl-9 text-sm"
@@ -502,7 +508,7 @@ function AddRepoDialog({
           </div>
           <button
             type="button"
-            aria-label="Reload repositories"
+            aria-label={t("settings.addRepo.reload", locale)}
             disabled={isFetching}
             className="flex size-9 shrink-0 items-center justify-center rounded-md border border-input bg-background text-muted-foreground hover:text-foreground transition-colors disabled:opacity-50"
             onClick={() =>
@@ -535,11 +541,11 @@ function AddRepoDialog({
             ) : repos.length === 0 ? (
               <div className="flex flex-col items-center gap-2 py-10 text-muted-foreground/60">
                 <BookOpen className="size-8" />
-                <p className="text-sm">No accessible repositories found.</p>
+                <p className="text-sm">{t("settings.addRepo.empty", locale)}</p>
               </div>
             ) : filtered.length === 0 ? (
               <p className="text-center text-sm text-muted-foreground/60 py-10">
-                No repositories match &ldquo;{search}&rdquo
+                {t("settings.addRepo.noMatch", locale, { search })}
               </p>
             ) : (
               filtered.map((repo) => (
@@ -558,7 +564,7 @@ function AddRepoDialog({
                       </span>
                       {repo.private && (
                         <span className="shrink-0 rounded px-1.5 py-0.5 text-xs font-semibold bg-muted text-muted-foreground">
-                          Private
+                          {t("settings.addRepo.private", locale)}
                         </span>
                       )}
                     </div>
@@ -587,7 +593,7 @@ function AddRepoDialog({
             disabled={linkMutation.isPending}
             onClick={() => handleOpenChange(false)}
           >
-            Close
+            {t("settings.addRepo.close", locale)}
           </Btn>
         </div>
       </ModalContent>
@@ -602,11 +608,13 @@ function LinkedRepoItem({
   projectId,
   repo,
   canEdit,
+  locale,
 }: {
   api: PluginApiClient;
   projectId: string;
   repo: LinkedRepository;
   canEdit: boolean;
+  locale?: string;
 }) {
   const queryClient = useQueryClient();
   const [confirmOpen, setConfirmOpen] = useState(false);
@@ -638,7 +646,7 @@ function LinkedRepoItem({
               {repo.full_name}
             </a>
             <p className="text-xs text-muted-foreground mt-0.5">
-              Default branch:{" "}
+              {t("settings.repos.defaultBranch", locale)}{" "}
               <code className="font-mono">{repo.default_branch}</code>
             </p>
           </div>
@@ -651,7 +659,7 @@ function LinkedRepoItem({
             onClick={() => setConfirmOpen(true)}
           >
             <Unlink className="size-3.5" />
-            Unlink
+            {t("settings.unlink.action", locale)}
           </Btn>
         )}
       </div>
@@ -662,18 +670,18 @@ function LinkedRepoItem({
             <Unlink className="size-5 text-destructive" />
           </div>
           <h2 className="text-base font-semibold leading-none mb-1.5">
-            Unlink repository
+            {t("settings.unlink.title", locale)}
           </h2>
           <p className="text-sm text-muted-foreground mb-4">
-            This will remove the link to{" "}
+            {t("settings.unlink.bodyBefore", locale)}{" "}
             <span className="font-semibold text-foreground">
               {repo.full_name}
             </span>{" "}
-            and attempt to delete the webhook from GitLab.
+            {t("settings.unlink.bodyAfter", locale)}
           </p>
           {unlinkMutation.isError && (
             <p className="text-xs text-destructive bg-destructive/10 rounded-lg px-3 py-2 mb-4">
-              Failed to unlink. Please try again.
+              {t("settings.unlink.failed", locale)}
             </p>
           )}
           <div className="flex justify-end gap-2">
@@ -683,7 +691,7 @@ function LinkedRepoItem({
               disabled={unlinkMutation.isPending}
               onClick={() => setConfirmOpen(false)}
             >
-              Cancel
+              {t("common.cancel", locale)}
             </Btn>
             <Btn
               variant="destructive"
@@ -694,10 +702,10 @@ function LinkedRepoItem({
               {unlinkMutation.isPending ? (
                 <>
                   <Loader2 className="size-3.5 animate-spin" />
-                  Unlinking…
+                  {t("settings.unlink.unlinking", locale)}
                 </>
               ) : (
-                "Unlink repository"
+                t("settings.unlink.confirm", locale)
               )}
             </Btn>
           </div>
@@ -713,10 +721,12 @@ function GitLabSettingsInner({
   api,
   projectId,
   canEdit,
+  locale,
 }: {
   api: PluginApiClient;
   projectId: string;
   canEdit: boolean;
+  locale?: string;
 }) {
   const { data: integration, isLoading: integrationLoading } = useQuery<
     GitLabIntegration | undefined
@@ -744,8 +754,16 @@ function GitLabSettingsInner({
   const [addRepoOpen, setAddRepoOpen] = useState(false);
 
   const steps = [
-    { num: 1, label: "Connect a GitLab token", done: hasIntegration },
-    { num: 2, label: "Link a repository", done: hasRepos },
+    {
+      num: 1,
+      label: t("settings.step.connectToken", locale),
+      done: hasIntegration,
+    },
+    {
+      num: 2,
+      label: t("settings.step.linkRepo", locale),
+      done: hasRepos,
+    },
   ];
 
   return (
@@ -755,13 +773,11 @@ function GitLabSettingsInner({
         <div className="flex items-center gap-3 mb-1">
           <GitLabIcon className="size-5 text-foreground/80" />
           <h3 className="font-[Syne] text-base font-semibold">
-            GitLab Integration
+            {t("settings.integrationTitle", locale)}
           </h3>
         </div>
         <p className="text-sm text-muted-foreground mb-5">
-          Link GitLab repositories to track merge requests, create branches from
-          tasks, and receive webhook events automatically. You can link multiple
-          repositories to a single project.
+          {t("settings.integrationDesc", locale)}
         </p>
 
         {/* Progress steps */}
@@ -798,7 +814,7 @@ function GitLabSettingsInner({
           <div className="flex items-center gap-2">
             <KeyRound className="size-3.5 text-muted-foreground/70" />
             <label className="text-sm font-semibold text-foreground/80">
-              {t("settings.token.label")}
+              {t("settings.token.label", locale)}
             </label>
           </div>
           {integrationLoading ? (
@@ -810,6 +826,7 @@ function GitLabSettingsInner({
               hasIntegration={hasIntegration}
               onTokenSet={() => setAddRepoOpen(true)}
               canEdit={canEdit}
+              locale={locale}
               integration={integration}
             />
           )}
@@ -823,11 +840,11 @@ function GitLabSettingsInner({
             <div className="flex items-center gap-2">
               <GitPullRequest className="size-4 text-foreground/80" />
               <h3 className="font-[Syne] text-base font-semibold">
-                Linked Repositories
+                {t("settings.repos.title", locale)}
               </h3>
               <button
                 type="button"
-                aria-label="Reload linked repositories"
+                aria-label={t("settings.repos.reload", locale)}
                 disabled={reposLoading}
                 className="text-muted-foreground/40 hover:text-muted-foreground transition-colors disabled:opacity-30"
                 onClick={() =>
@@ -850,14 +867,14 @@ function GitLabSettingsInner({
                 onClick={() => setAddRepoOpen(true)}
               >
                 <Plus className="size-3.5" />
-                Add repository
+                {t("settings.repos.link", locale)}
               </Btn>
             )}
           </div>
           <p className="text-sm text-muted-foreground mb-4">
             {hasRepos
-              ? "Webhooks are registered automatically for each linked repository."
-              : "No repositories linked yet. Link a repository to track merge requests and branches."}
+              ? t("settings.repos.webhooksAuto", locale)
+              : t("settings.repos.emptyHint", locale)}
           </p>
 
           {reposLoading ? (
@@ -874,13 +891,14 @@ function GitLabSettingsInner({
                   projectId={projectId}
                   repo={repo}
                   canEdit={canEdit}
+                  locale={locale}
                 />
               ))}
 
               {!hasRepos && (
                 <div className="flex flex-col items-center gap-3 py-8 text-muted-foreground/60">
                   <GitBranch className="size-8" />
-                  <p className="text-sm">No repositories linked yet.</p>
+                  <p className="text-sm">{t("settings.repos.empty", locale)}</p>
                   {canEdit && (
                     <Btn
                       variant="outline"
@@ -888,7 +906,7 @@ function GitLabSettingsInner({
                       onClick={() => setAddRepoOpen(true)}
                     >
                       <Plus className="size-3.5" />
-                      Add your first repository
+                      {t("settings.repos.linkFirst", locale)}
                     </Btn>
                   )}
                 </div>
@@ -902,6 +920,7 @@ function GitLabSettingsInner({
               projectId={projectId}
               open={addRepoOpen}
               onOpenChange={setAddRepoOpen}
+              locale={locale}
             />
           )}
         </div>
@@ -912,9 +931,7 @@ function GitLabSettingsInner({
         <div className="flex items-start gap-2.5 rounded-lg bg-muted/40 border border-border/40 px-4 py-3">
           <AlertCircle className="size-4 text-muted-foreground/70 shrink-0 mt-0.5" />
           <p className="text-xs text-muted-foreground leading-relaxed">
-            Webhooks are registered on all linked repositories. GitLab will push{" "}
-            <code className="font-mono">pull_request</code> events to keep PR
-            status in sync automatically.
+            {t("settings.webhook.hint", locale)}
           </p>
         </div>
       )}
@@ -924,8 +941,7 @@ function GitLabSettingsInner({
         <div className="flex items-start gap-2.5 rounded-lg bg-muted/30 border border-dashed border-border/50 px-4 py-3">
           <X className="size-4 text-muted-foreground/50 shrink-0 mt-0.5" />
           <p className="text-xs text-muted-foreground">
-            No GitLab integration configured. Add a personal access token to get
-            started.
+            {t("settings.noIntegration", locale)}
           </p>
         </div>
       )}
@@ -960,7 +976,12 @@ export default function GitLabSettingsTab({
 
   return (
     <PluginQueryClientProvider>
-      <GitLabSettingsInner api={api} projectId={projectId} canEdit={canEdit} />
+      <GitLabSettingsInner
+        api={api}
+        projectId={projectId}
+        canEdit={canEdit}
+        locale={locale}
+      />
     </PluginQueryClientProvider>
   );
 }
